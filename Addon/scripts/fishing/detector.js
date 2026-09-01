@@ -418,12 +418,11 @@ export function throwItemToPlayer(item, player) {
   const horizontalDistance = Math.sqrt(dx * dx + dz * dz);
   if (horizontalDistance < 0.01) return;
 
-  // Fitted from in-game trajectory debug (3 samples: d=0.75/3.77/7.44):
-  //   speed ≈ 0.13 * dPlayer, vy ≈ 0.12 * dPlayer
-  // vanilla fish arc: ~12 tick flight, drag 0.98, gravity 0.04.
-  // → v_h = 0.10 * d, v_y = 0.12 * d (boost y for arc apex ~2-3 blocks above)
-  const v_h = horizontalDistance * 0.10;
-  const v_y = Math.max(0.18, horizontalDistance * 0.12);
+  // Fitted from 7 in-game trajectory samples (dPlayer 0.75→7.62):
+  //   speed/d ≈ 0.15 (mean 0.15, std 0.03), vy/d ≈ 0.13 (mean 0.13, std 0.05)
+  // → v_h = 0.13 * d, v_y = 0.13 * d, floor 0.18
+  const v_h = horizontalDistance * 0.13;
+  const v_y = Math.max(0.18, horizontalDistance * 0.13);
   const dirX = dx / horizontalDistance;
   const dirZ = dz / horizontalDistance;
 
@@ -2404,7 +2403,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-01-p5-item-fit-arc', undefined);
+  log('detector initialized v2026-09-01-p5-item-fit-arc-v2', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);
