@@ -430,16 +430,15 @@ export function throwItemToPlayer(item, player) {
   const horizontalDistance = Math.sqrt(dx * dx + dz * dz);
   if (horizontalDistance < 0.01) return;
 
-  // Ballistic fit: target flight time T=8 ticks. Cap vy 0.5 (peak ~3 blocks
-  // above start) to avoid shooting item into the sky when dy is large
-  // (player far above). Sample 3 had dy=6.46 → vy=1.12, item bay ~15 blocks
-  // up — way too high. Capping at 0.5 gives gentle arc.
-  // Empirical: 13 samples show mean vy_real ≈ 0.30-0.50, peak at d=7 ≈ 0.95.
+  // Fit từ 11 vanilla samples (ChatGPT regression):
+  //   v_H ≈ 0.094 * dH  (R²=0.79, RMSE=0.17)
+  //   v_y = (dy + 0.04 * T * (T-1) / 2) / T  với T=8 (≈ ballistic reach)
+  // Không cap 0.55 (vanilla có vy=0.78-0.93 ở dH=3-10). Drag 0.98 horizontal,
+  // gravity 0.04 vertical. applyImpulse set v=impulse trực tiếp (no drag clamp).
   const T = 8;
   const g = 0.04;
-  const v_h = horizontalDistance / T;
-  let v_y = (dy + 0.5 * g * T * T) / T + 0.15;
-  v_y = Math.max(0.18, Math.min(0.55, v_y));
+  const v_h = horizontalDistance * 0.094;
+  const v_y = (dy + 0.5 * g * T * (T - 1)) / T;
   const dirX = dx / horizontalDistance;
   const dirZ = dz / horizontalDistance;
 
@@ -2431,7 +2430,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-01-p5-item-fit-arc-v4', undefined);
+  log('detector initialized v2026-09-01-p5-item-fit-arc-v5', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);
