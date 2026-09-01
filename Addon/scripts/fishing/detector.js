@@ -411,26 +411,28 @@ function dot3D(a, b) {
  */
 export function throwItemToPlayer(item, player) {
   const from = item.location;
-  const to = player.location;
+  const to = /** @type {Player} */ (player).location;
   const dx = to.x - from.x;
   const dy = to.y - from.y;
   const dz = to.z - from.z;
   const horizontalDistance = Math.sqrt(dx * dx + dz * dz);
   if (horizontalDistance < 0.01) return;
 
-  const flightTime = 12;
-  const gravity = 0.08;
+  // Fitted from in-game trajectory debug (3 samples: d=0.75/3.77/7.44):
+  //   speed ≈ 0.13 * dPlayer, vy ≈ 0.12 * dPlayer
+  // vanilla fish arc: ~12 tick flight, drag 0.98, gravity 0.04.
+  // → v_h = 0.10 * d, v_y = 0.12 * d (boost y for arc apex ~2-3 blocks above)
+  const v_h = horizontalDistance * 0.10;
+  const v_y = Math.max(0.18, horizontalDistance * 0.12);
   const dirX = dx / horizontalDistance;
   const dirZ = dz / horizontalDistance;
-  const horizontalSpeed = horizontalDistance / flightTime;
-  const verticalSpeed = (dy + 0.5 * gravity * flightTime * flightTime) / flightTime;
 
   try { item.clearVelocity(); } catch { /* ignore */ }
   try {
     item.applyImpulse({
-      x: dirX * horizontalSpeed,
-      y: verticalSpeed,
-      z: dirZ * horizontalSpeed,
+      x: dirX * v_h,
+      y: v_y,
+      z: dirZ * v_h,
     });
   } catch { /* ignore */ }
 }
@@ -2402,7 +2404,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-01-p5-item-debug-traj', undefined);
+  log('detector initialized v2026-09-01-p5-item-fit-arc', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);
