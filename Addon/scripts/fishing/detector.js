@@ -183,23 +183,18 @@ let telemetryHookSpeedEMA = 0;
 const HOOK_SPEED_EMA_ALPHA = 0.1;
 
 /**
- * P5.2: vanilla fish trajectory samples (rolling window, max 50).
- * Mỗi entry: {dH, v_h, v_y, dx, dy, dz, time}. Dùng để self-tune
- * throwItemToPlayer mỗi 10 catch (regression k_h, k_y).
- * @type {Array<{dH:number, vH:number, vY:number, dx:number, dy:number, dz:number, time:number}>}
+ * P5.4: Engine-derived constants from Minecraft Legacy FishingHook::retrieve.
+ * Formula: v_x = kH*dx, v_y = kY*dy + kB*sqrt(d), v_z = kH*dz
+ *   where d = sqrt(dx² + dy² + dz²) (3D distance hook→player).
+ *
+ * Locked to vanilla Legacy values (kH=0.1, kY=0.1, kB=0.08). P5.3 OLS
+ * analysis on 14 samples showed engine defaults beat regression: mean
+ * abs err% 3.69% (engine) vs 5.48% (OLS overfit kB→0.047). Constants
+ * are const — no self-tune.
  */
-const vanillaTrajectorySamples = [];
-const VANILLA_TRAJ_MAX = 50;
-const SELF_TUNE_EVERY = 10;
-
-/** Tuned coefficients for engine-derived formula:
- *   v_x = kH*dx, v_y = kY*dy + kB*sqrt(d), v_z = kH*dz
- * Defaults from Minecraft Legacy FishingHook::retrieve (kH=0.1, kY=0.1, kB=0.08).
- * Self-tune updates these from rolling window every SELF_TUNE_EVERY catches. */
-let tunedKH = 0.1;
-let tunedKY = 0.1;
-let tunedKB = 0.08;
-let successSinceTune = 0;
+const TUNED_KH = 0.1;
+const TUNED_KY = 0.1;
+const TUNED_KB = 0.08;
 
 /** P1.2: hookId -> HookTrajectory (samples + derived metrics) */
 const hookTrajectories = new Map();
@@ -429,53 +424,10 @@ function dot3D(a, b) {
  * @param {Player} player
  */
 /**
- * P5.2: self-tune 3 constants (kH, kY, kB) từ rolling window.
- * Reverse-engineer vanilla constants: v_x/dx ≈ kH, v_z/dz ≈ kH,
- *   (v_y - kY*dy) / sqrt(d) ≈ kB
- * Bỏ outlier: samples có dx/dz < 0.1 (avoid divide by tiny) hoặc |vel| > 5.
- * @returns {{kH:number, kY:number, kB:number, n:number}|null}
+ * P5.4: engine-derived formula (vanilla FishingHook::retrieve).
+ * Constants locked to Legacy values — see TUNED_KH/KY/KB at top.
+ * Mean abs err 3.69% on 14 in-game samples (better than OLS 5.48%).
  */
-function selfTuneThrowItem() {
-  let sumKH = 0, nH = 0;
-  let sumKY = 0, nY = 0;
-  let sumKB = 0, nB = 0;
-  for (const s of vanillaTrajectorySamples) {
-    // kH: v_x/dx hoặc v_z/dz (dùng horizontal component magnitude)
-    const hMag = Math.sqrt(s.dx * s.dx + s.dz * s.dz);
-    if (hMag > 0.5) {
-      // observed horizontal velocity magnitude từ sample (vH)
-      sumKH += s.vH / hMag;
-      nH += 1;
-    }
-    // kY: v_y / dy nếu dy đáng kể
-    if (Math.abs(s.dy) > 0.5) {
-      // dY contribution chỉ 1 phần v_y, cần isolate
-      // Approximation: assume kY=0.1 ban đầu để solve kB
-      const d3 = Math.sqrt(s.dx * s.dx + s.dy * s.dy + s.dz * s.dz);
-      if (d3 > 0.1 && s.vY > 0) {
-        // v_y = kY*dy + kB*sqrt(d) → nếu dy đủ lớn, kY ≈ (v_y - kB*sqrt(d)) / dy
-        // Để stable: dùng dy ratio để filter, kY chỉ estimate khi dy dominates
-        if (s.dy > 1.0) {
-          const kB_est = 0.08; // prior
-          sumKY += (s.vY - kB_est * Math.sqrt(d3)) / s.dy;
-          nY += 1;
-        }
-        // kB: từ total v_y trừ kY*dy
-        // v_y = kY*dy + kB*sqrt(d) → kB = (v_y - kY*dy) / sqrt(d)
-        const kY_est = 0.1; // prior
-        sumKB += (s.vY - kY_est * s.dy) / Math.sqrt(d3);
-        nB += 1;
-      }
-    }
-  }
-  if (nH < 5) return null;
-  tunedKH = sumKH / nH;
-  if (nY >= 3) tunedKY = sumKY / nY;
-  if (nB >= 3) tunedKB = sumKB / nB;
-  log(`self-tune kH=${tunedKH.toFixed(4)} (n=${nH}) kY=${tunedKY.toFixed(4)} (n=${nY}) kB=${tunedKB.toFixed(4)} (n=${nB}) window=${vanillaTrajectorySamples.length}`);
-  return { kH: tunedKH, kY: tunedKY, kB: tunedKB, n: nH + nY + nB };
-}
-
 export function throwItemToPlayer(item, player) {
   // Debug: log before applyImpulse — so we can compare replacement arc vs
   // vanilla fish arc (logged in onEntitySpawn for item).
@@ -497,15 +449,14 @@ export function throwItemToPlayer(item, player) {
   const horizontalDistance = Math.sqrt(dx * dx + dz * dz);
   if (horizontalDistance < 0.01) return;
 
-  // P5.2: engine-derived formula (vanilla FishingHook::retrieve):
+  // P5.4: engine-derived formula (vanilla FishingHook::retrieve):
   //   v_x = kH * dx, v_z = kH * dz, v_y = kY * dy + kB * sqrt(d)
   //   where d = sqrt(dx² + dy² + dz²) (3D distance hook→player)
-  // Default constants (Legacy source): kH=0.1, kY=0.1, kB=0.08.
-  // Self-tune updates these from rolling window every 10 catches.
+  // Constants locked: kH=0.1, kY=0.1, kB=0.08 (Minecraft Legacy source).
   const dist3D = Math.sqrt(dx * dx + dy * dy + dz * dz);
-  const v_x = dx * tunedKH;
-  const v_y = dy * tunedKY + Math.sqrt(dist3D) * tunedKB;
-  const v_z = dz * tunedKH;
+  const v_x = dx * TUNED_KH;
+  const v_y = dy * TUNED_KY + Math.sqrt(dist3D) * TUNED_KB;
+  const v_z = dz * TUNED_KH;
 
   try { item.clearVelocity(); } catch { /* ignore */ }
   try {
@@ -515,12 +466,6 @@ export function throwItemToPlayer(item, player) {
       z: v_z,
     });
   } catch { /* ignore */ }
-  // P5.2: increment success counter, trigger self-tune nếu đủ mốc
-  successSinceTune += 1;
-  if (successSinceTune >= SELF_TUNE_EVERY && vanillaTrajectorySamples.length >= 5) {
-    selfTuneThrowItem();
-    successSinceTune = 0;
-  }
   // Debug: log after applyImpulse — confirm impulse applied + log predicted flight
   log(
     `replacement-trajectory ${dbgItemName} type=${dbgType} ` +
@@ -2192,13 +2137,7 @@ function onEntitySpawn(event) {
           `dPlayer=${dPlayer.toFixed(2)} dirToPlayer=(${dDir.x.toFixed(2)},${dDir.y.toFixed(2)},${dDir.z.toFixed(2)}) `;
       }
     }
-    // P5.2: push vanilla sample (chỉ khi có player context để biết dH).
-    if (_dH > 0.1 && _vH > 0.01) {
-      vanillaTrajectorySamples.push({ dH: _dH, vH: _vH, vY: _ivy, dx: _pDx, dy: _pDy, dz: _pDz, time: Date.now() });
-      while (vanillaTrajectorySamples.length > VANILLA_TRAJ_MAX) {
-        vanillaTrajectorySamples.shift();
-      }
-    }
+    // P5.4: không còn push sample — constants locked từ engine source.
     log(
       `item-trajectory ${itemTypeId} id=${entity.id} hook=${ctx.hookId} distHook=${ctx.distHook.toFixed(2)} ` +
       `vel=(${itemVel.x.toFixed(3)},${itemVel.y.toFixed(3)},${itemVel.z.toFixed(3)}) ` +
@@ -2520,7 +2459,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-01-p5-item-engine-formula', undefined);
+  log('detector initialized v2026-09-01-p5-engine-constants-locked', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);
