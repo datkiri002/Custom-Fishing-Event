@@ -173,6 +173,29 @@
  */
 
 /**
+ * HookTrajectory — time-series samples của hook motion sau spawn.
+ * P1.2: capture T0 (spawn), T1 (+1 tick), T2 (+2 tick).
+ * Soft evidence, không phải hard gate. Nếu hook bị remove trước T2 thì
+ * dùng các sample đã có.
+ * @typedef {Object} HookTrajectorySample
+ * @property {number} tick
+ * @property {number} time
+ * @property {Vector3} location
+ * @property {Vector3} velocity
+ */
+
+/**
+ * @typedef {Object} HookTrajectory
+ * @property {string} hookId
+ * @property {HookTrajectorySample[]} samples
+ * @property {number} directionStability    0-100, std của direction vectors
+ * @property {number} velocityConsistency   0-100, std của |velocity|
+ * @property {number} acceleration          approx Δvelocity/Δtick
+ * @property {number} trajectoryDeviation   deviation so với expected cast trajectory
+ * @property {number} expectedError         kinematic fit vs Before snapshot
+ */
+
+/**
  * @typedef {Object} FishingCatchEvent
  * @property {Player} player
  * @property {string} hookId

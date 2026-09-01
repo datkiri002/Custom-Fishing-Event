@@ -30,15 +30,15 @@ export const FALLBACK_OWNER_SCORE_MARGIN = 20;
 export const ENABLE_PICKUP_INTERCEPTION = true;
 
 // ===== Stage 1 evidence weights (tổng = 1000) =====
+// P1.3: de-correlate. Ray + direction + angular gom vào CAST_KINEMATIC_WEIGHT.
+// playerMomentum penalty đổi thành motion compensation prediction.
 export const WEIGHT_TEMPORAL = 150;
 export const WEIGHT_SPATIAL = 200;
-export const WEIGHT_RAY_PROJECTION = 200;
-export const WEIGHT_ANGULAR = 150;
+export const CAST_KINEMATIC_WEIGHT = 400;  // ray + direction + angular (gom)
 export const WEIGHT_HOOK_VELOCITY = 100;
-export const WEIGHT_PLAYER_MOMENTUM = 100;
-export const CAST_DIRECTION_WEIGHT = 50;   // angle giữa viewDir và to-hook vector
-export const CAST_EXPECTED_WEIGHT = 50;    // hook velocity vs kinematic expectation
-// Tổng: 150+200+200+150+100+100+50+50 = 1000
+export const CAST_PREDICTION_WEIGHT = 100; // motion compensation (P1.1)
+export const CAST_EXPECTED_WEIGHT = 50;    // hook velocity vs expected trajectory
+// Tổng: 150+200+400+100+100+50 = 1000
 
 // Cast→Hook thresholds (ray projection)
 export const CAST_RAY_MIN_PROJECTION = 0.5;       // <0.5 = nhìn ngược hướng hook

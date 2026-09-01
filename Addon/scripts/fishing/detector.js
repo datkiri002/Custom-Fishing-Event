@@ -40,11 +40,9 @@ import {
   ENABLE_PICKUP_INTERCEPTION,
   WEIGHT_TEMPORAL,
   WEIGHT_SPATIAL,
-  WEIGHT_RAY_PROJECTION,
-  WEIGHT_ANGULAR,
+  CAST_KINEMATIC_WEIGHT,
   WEIGHT_HOOK_VELOCITY,
-  WEIGHT_PLAYER_MOMENTUM,
-  CAST_DIRECTION_WEIGHT,
+  CAST_PREDICTION_WEIGHT,
   CAST_EXPECTED_WEIGHT,
   CAST_RAY_MAX_PERPENDICULAR,
   CAST_HOOK_VEL_MIN,
@@ -166,7 +164,153 @@ const telemetry = {
   pendingBeforeEnqueued: 0,
   pendingBeforeMatched: 0,
   pendingBeforeExpired: 0,
+  // hook trajectory (P1.2)
+  trajectorySamplesTotal: 0,  // tổng sample đã capture
+  trajectorySamplesDropped: 0,  // hook bị remove trước khi capture đủ
+  // P1.4: hook speed calibration (EMA)
+  hookSpeedSamples: 0,
 };
+
+/** P1.4: runtime calibration của hook speed. EMA (alpha=0.1). Update từ
+ * CONFIRMED hooks. Nếu chưa có sample → dùng CAST_HOOK_VEL_EXPECT. */
+let telemetryHookSpeedEMA = 0;
+const HOOK_SPEED_EMA_ALPHA = 0.1;
+
+/** P1.2: hookId -> HookTrajectory (samples + derived metrics) */
+const hookTrajectories = new Map();
+
+/**
+ * Schedule T1, T2 samples cho 1 hook. T0 được capture inline tại spawn.
+ * Dùng system.runTimeout để polling — KHÔNG tốn event loop nặng.
+ * @param {string} hookId
+ * @param {number} t0Speed
+ */
+function scheduleHookTrajectory(hookId, t0Speed) {
+  /** @type {HookTrajectory} */
+  const traj = {
+    hookId,
+    samples: [],
+    directionStability: 0,
+    velocityConsistency: 0,
+    acceleration: 0,
+    trajectoryDeviation: 0,
+    expectedError: 0,
+  };
+  hookTrajectories.set(hookId, traj);
+
+  // T1: +1 tick
+  try {
+    system.runTimeout(() => {
+      captureTrajectorySample(hookId, 1);
+    }, 1);
+  } catch { /* ignore */ }
+
+  // T2: +2 tick
+  try {
+    system.runTimeout(() => {
+      captureTrajectorySample(hookId, 2);
+    }, 2);
+  } catch { /* ignore */ }
+}
+
+/**
+ * Capture 1 sample cho hook trajectory. Nếu hook không còn tồn tại → skip
+ * (không phải lỗi, hook có thể bị remove sớm).
+ * @param {string} hookId
+ * @param {number} tickOffset  1 hoặc 2 (T1 hoặc T2)
+ */
+function captureTrajectorySample(hookId, tickOffset) {
+  const traj = hookTrajectories.get(hookId);
+  if (!traj) return;
+  // Tìm entity — có thể ở dimension nào cũng được
+  /** @type {Entity | undefined} */
+  let entity;
+  try {
+    entity = world.getEntity(hookId);
+  } catch { return; }
+  if (!entity) {
+    telemetry.trajectorySamplesDropped += 1;
+    return;
+  }
+  try {
+    traj.samples.push({
+      tick: system.currentTick,
+      time: Date.now(),
+      location: cloneVector(entity.location),
+      velocity: safeGetVelocity(entity),
+    });
+    telemetry.trajectorySamplesTotal += 1;
+    if (traj.samples.length >= 2) {
+      computeTrajectoryMetrics(traj);
+    }
+  } catch { /* ignore */ }
+}
+
+/**
+ * Tính direction stability + velocity consistency từ ≥2 samples.
+ * KHÔNG dùng làm hard gate — soft evidence.
+ * @param {HookTrajectory} traj
+ */
+function computeTrajectoryMetrics(traj) {
+  if (traj.samples.length < 2) return;
+  // Direction stability: std của angle giữa velocity vectors
+  let angleSum = 0;
+  let count = 0;
+  for (let i = 1; i < traj.samples.length; i++) {
+    const a = traj.samples[i - 1].velocity;
+    const b = traj.samples[i].velocity;
+    const ma = vecMagnitude(a);
+    const mb = vecMagnitude(b);
+    if (ma < 0.01 || mb < 0.01) continue;
+    const dot = a.x * b.x + a.y * b.y + a.z * b.z;
+    const cosA = clamp(dot / (ma * mb), -1, 1);
+    angleSum += Math.acos(cosA);
+    count += 1;
+  }
+  if (count > 0) {
+    const avgAngle = angleSum / count;
+    // 0 rad = perfect stability (100), π/2 = unstable (0)
+    traj.directionStability = Math.round(clamp(100 * (1 - avgAngle / (Math.PI / 2)), 0, 100));
+  }
+
+  // Velocity consistency: 100 - std% / mean
+  const speeds = traj.samples.map(s => vecMagnitude(s.velocity));
+  const mean = speeds.reduce((a, b) => a + b, 0) / speeds.length;
+  const variance = speeds.reduce((acc, s) => acc + (s - mean) ** 2, 0) / speeds.length;
+  const std = Math.sqrt(variance);
+  if (mean > 0.01) {
+    traj.velocityConsistency = Math.round(clamp(100 * (1 - std / mean), 0, 100));
+  }
+
+  // Acceleration approx: (v_last - v_first) / tickDelta
+  if (traj.samples.length >= 2) {
+    const v0 = traj.samples[0].velocity;
+    const vN = traj.samples[traj.samples.length - 1].velocity;
+    const tickDelta = traj.samples[traj.samples.length - 1].tick - traj.samples[0].tick;
+    if (tickDelta > 0) {
+      const a = {
+        x: (vN.x - v0.x) / tickDelta,
+        y: (vN.y - v0.y) / tickDelta,
+        z: (vN.z - v0.z) / tickDelta,
+      };
+      traj.acceleration = vecMagnitude(a);
+    }
+  }
+}
+
+/**
+ * Lấy trajectory cho 1 hook. Cleanup sau khi hook bị remove.
+ * @param {string} hookId
+ * @returns {HookTrajectory | undefined}
+ */
+function getHookTrajectory(hookId) {
+  return hookTrajectories.get(hookId);
+}
+
+/** Cleanup trajectory khi hook remove */
+function cleanupHookTrajectory(hookId) {
+  hookTrajectories.delete(hookId);
+}
 
 /** @param {string} msg @param {string|undefined} [ownerId] */
 function log(msg, ownerId) {
@@ -263,6 +407,107 @@ function getSessionsForPlayer(playerId) {
     if (session) result.push(session);
   }
   return result;
+}
+
+/**
+ * P1.5: lấy các FishingSession đang active (FISHING / INVENTORY_CHANGED /
+ * PENDING_RESULT / REEL_REQUESTED) của player. Dùng để quyết định Rod use
+ * là CAST hay REEL.
+ * @param {string} playerId
+ * @returns {FishingSession[]}
+ */
+function getActiveHookSessionsForPlayer(playerId) {
+  const all = getSessionsForPlayer(playerId);
+  return all.filter((s) =>
+    s.state === 'FISHING' ||
+    s.state === 'INVENTORY_CHANGED' ||
+    s.state === 'PENDING_RESULT' ||
+    s.state === 'REEL_REQUESTED'
+  );
+}
+
+/**
+ * P1.6: score Reel candidate ↔ Active hook.
+ * Dimensions: temporal proximity (Rod use → hook lifetime), player-to-hook
+ * distance, hook state, session consistency, sequence match.
+ * @param {Player} player
+ * @param {FishingSession} activeSession
+ * @param {Vector3} reelLocation   player location tại reel moment
+ * @param {number} reelTick
+ * @returns {number}  score 0-1000
+ */
+function scoreReelCandidate(player, activeSession, reelLocation, reelTick) {
+  let score = 0;
+
+  // Player-to-hook distance (300)
+  const hookLoc = activeSession.hookLocation;
+  const d = distance3D(reelLocation, hookLoc);
+  const dScore = clamp(100 * (1 - d / FALLBACK_OWNER_MAX_DISTANCE), 0, 100);
+  score += dScore * 3;
+
+  // Temporal: hook lifetime tính đến reel moment (200)
+  // Hook càng lâu + reel trùng → tốt (hook đã "chín")
+  const lifetime = reelTick - activeSession.hookSpawnTick;
+  const lifetimeScore = clamp(100 * Math.min(1, lifetime / 20), 0, 100);
+  score += lifetimeScore * 2;
+
+  // Session consistency (200)
+  // DIRECT_CONFIRMED > DIRECT_AMBIGUOUS > FALLBACK > UNKNOWN
+  const conf = activeSession.associationMethod;
+  const confScore =
+    conf === 'DIRECT_CONFIRMED' ? 100 :
+    conf === 'DIRECT_AMBIGUOUS' ? 60 :
+    conf === 'TENTATIVE' ? 40 :
+    conf === 'FALLBACK' ? 30 : 20;
+  score += confScore * 2;
+
+  // Cast exclusivity bonus: nếu session CHƯA được reel-ed (100)
+  const stateScore = activeSession.state === 'FISHING' ? 100 : 50;
+  score += stateScore;
+
+  // Sequence match bonus (200): nếu session còn mới so với reel tick
+  const ageScore = clamp(100 * (1 - lifetime / 100), 0, 100);
+  score += ageScore * 2;
+
+  return Math.round(score);
+}
+
+/**
+ * P1.6: associate Reel event ↔ active hooks.
+ * Score TẤT CẢ active hook × Reel candidate. Lấy best + second.
+ * Margin check: chỉ return hooks với margin đủ lớn. Nếu best/second
+ * margin thấp → return empty (không force assign).
+ * @param {Player} player
+ * @param {FishingSession[]} activeSessions
+ * @returns {{ session: FishingSession, score: number, margin: number }[]}
+ */
+function associateReelToHook(player, activeSessions) {
+  if (activeSessions.length === 0) return [];
+  const reelLoc = player.location;
+  const reelTick = system.currentTick;
+  /** @type {{ session: FishingSession, score: number }[]} */
+  const scored = [];
+  for (const session of activeSessions) {
+    const score = scoreReelCandidate(player, session, reelLoc, reelTick);
+    scored.push({ session, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  if (scored.length === 0) return [];
+
+  // P1.6: KHÔNG force assign khi margin thấp.
+  // Solo: 1 active hook → CONFIRMED thoải mái.
+  // Multi: yêu cầu margin ≥ 200.
+  const best = scored[0];
+  const second = scored[1];
+  if (activeSessions.length === 1) {
+    return [{ session: best.session, score: best.score, margin: 999 }];
+  }
+  const margin = best.score - second.score;
+  if (margin < 200) {
+    log(`reel: best=${best.score} second=${second.score} margin=${margin} — UNCERTAIN, no assign`, player.id);
+    return [];
+  }
+  return [{ session: best.session, score: best.score, margin }];
 }
 
 /** @param {FishingSession} session */
@@ -618,13 +863,37 @@ function assessCastHookAssociation(hook, player, session, hookVelocity) {
     }
   }
 
-  // Hook velocity magnitude: hook bay xa = tốt
-  const hookVelocityScore = clamp(100 * (hookVelMag / CAST_HOOK_VEL_EXPECT), 0, 100);
+  // Hook velocity magnitude: dùng calibration từ telemetry runtime
+  // (P1.4 — telemetryHookSpeedEMA). Nếu chưa có calibration dùng
+  // CAST_HOOK_VEL_EXPECT làm default. Score dựa trên fit-to-distribution,
+  // KHÔNG phải magnitude thuần.
+  const expectedSpeed = telemetryHookSpeedEMA > 0.01
+    ? telemetryHookSpeedEMA
+    : CAST_HOOK_VEL_EXPECT;
+  // P1.4: hook speed cao hơn expected KHÔNG đồng nghĩa score cao hơn.
+  // Chỉ đo "fit với distribution expected" (gần expected = tốt, quá xa = kém).
+  const speedDelta = Math.abs(hookVelMag - expectedSpeed);
+  const hookVelocityScore = clamp(100 * (1 - speedDelta / (expectedSpeed * 2)), 0, 100);
 
-  // Player momentum: đứng yên = tốt
+  // P1.1: Motion compensation. KHÔNG coi player moving là negative evidence.
+  // Dùng P0 + V0*Δt để predict player location khi hook spawn, so với hookSpawn.
+  // Nếu prediction fit → strong positive (Player chạy vẫn có thể là owner).
   const playerVel = before?.velocity ?? after?.velocity;
   const playerSpeed = vecMagnitude(/** @type {Vector3} */ (playerVel));
-  const playerMomentumScore = clamp(100 * (1 - playerSpeed / CAST_PLAYER_SPEED_MAX), 0, 100);
+  let predictionErrorScore = 50;  // neutral khi không tính được
+  if (playerVel && castLoc && (castTick !== undefined)) {
+    const deltaTicks = Math.max(0, system.currentTick - castTick);
+    const predictedLoc = {
+      x: castLoc.x + playerVel.x * deltaTicks,
+      y: castLoc.y + playerVel.y * deltaTicks,
+      z: castLoc.z + playerVel.z * deltaTicks,
+    };
+    const predictedError = distance3D(predictedLoc, hookLoc);
+    // Error càng nhỏ → score càng cao. Cùng ngưỡng CAST_TO_HOOK_DISTANCE.
+    predictionErrorScore = clamp(100 * (1 - predictedError / CAST_TO_HOOK_DISTANCE), 0, 100);
+  }
+  // Nếu player đứng yên (playerSpeed ≈ 0) thì predicted = castLoc, error =
+  // distance. Vẫn score đúng (không penalty, chỉ là special case).
 
   // Player-state consistency: before→after drift + playerConsistency field
   const playerStateScore = session.playerConsistency ?? 30;
@@ -634,14 +903,15 @@ function assessCastHookAssociation(hook, player, session, hookVelocity) {
   const consistencyMultiplier = 0.5 + (playerStateScore / 200); // 0.5-1.0
 
   // Weighted total (0-1000)
+  // P1.3: de-correlate. Ray + direction + angular → KINEMATIC group (gom).
+  // playerMomentum thay bằng predictionError (motion comp).
+  const kinematicScore = (rayScore + directionErrorScore + angularScore) / 3;
   const total = Math.round(
     (temporalScore * WEIGHT_TEMPORAL +
      spatialScore * WEIGHT_SPATIAL +
-     rayScore * WEIGHT_RAY_PROJECTION +
-     angularScore * WEIGHT_ANGULAR +
+     kinematicScore * CAST_KINEMATIC_WEIGHT +
      hookVelocityScore * WEIGHT_HOOK_VELOCITY +
-     playerMomentumScore * WEIGHT_PLAYER_MOMENTUM +
-     directionErrorScore * CAST_DIRECTION_WEIGHT +
+     predictionErrorScore * CAST_PREDICTION_WEIGHT +
      expectedScore * CAST_EXPECTED_WEIGHT) / 100 * consistencyMultiplier
   );
 
@@ -652,7 +922,7 @@ function assessCastHookAssociation(hook, player, session, hookVelocity) {
     rayProjection: Math.round(rayScore),
     angular: Math.round(angularScore),
     hookVelocity: Math.round(hookVelocityScore),
-    playerMomentum: Math.round(playerMomentumScore),
+    playerMomentum: Math.round(predictionErrorScore),  // P1.1: đổi tên field cho log
     beforeAfterConsistency: playerStateScore,
     total,
   };
@@ -1388,18 +1658,40 @@ function onFishingRodUse(event) {
   const item = event.itemStack;
   if (!item || item.typeId !== 'minecraft:fishing_rod') return;
 
-  // Register session TRƯỚC backfill/reel để session có trong pool khi
-  // backfillFallbackCast cần re-evaluate.
+  // P1.5: Cast vs Reel discrimination.
+  // Nếu player có active hook (FISHING / INVENTORY_CHANGED / PENDING_RESULT) →
+  // Rod use này là REEL, KHÔNG tạo CastSession mới.
+  const activeHooks = getActiveHookSessionsForPlayer(player.id);
+  if (activeHooks.length > 0) {
+    // Reel path: tạo ReelCandidates per active hook, score, associate
+    const reelDecisions = associateReelToHook(player, activeHooks);
+    if (reelDecisions.length === 0) {
+      log(`reel: no clear association for ${activeHooks.length} active hook(s)`, player.id);
+      return;
+    }
+    for (const decision of reelDecisions) {
+      const session = decision.session;
+      transition(session, 'REEL_REQUESTED');
+      session.lastKnownPlayerLocation = cloneVector(player.location);
+      reelSignal.trigger({
+        player,
+        hookId: session.hookId,
+        location: cloneVector(session.castLocation),
+        tick: system.currentTick,
+        timestamp: Date.now(),
+      });
+    }
+    log(`reel associated player=${player.name} hooks=${reelDecisions.length}/${activeHooks.length}`, player.id);
+    return;
+  }
+
+  // Cast path: tạo CastSession mới (không có active hook)
   const session = registerCastSession(player);
 
   if (backfillFallbackCast(player)) {
     return;
   }
 
-  if (requestReel(player)) {
-    log(`reel requested player=${player.name} hooks=${getSessionsForPlayer(player.id).length}`, player.id);
-    return;
-  }
   castSignal.trigger({
     player,
     location: cloneVector(session.after?.location ?? player.location),
@@ -1546,6 +1838,20 @@ function onEntitySpawn(event) {
     else if (confidence === 'FALLBACK') telemetry.fallback += 1;
     else telemetry.unknown += 1;
 
+    // P1.4: EMA update hook speed từ CONFIRMED hooks only
+    const hookSpeed = vecMagnitude(hookVelocity);
+    if (confidence === 'CONFIRMED' && hookSpeed >= CAST_HOOK_VEL_MIN) {
+      telemetry.hookSpeedSamples += 1;
+      if (telemetryHookSpeedEMA < 0.01) {
+        telemetryHookSpeedEMA = hookSpeed;
+      } else {
+        telemetryHookSpeedEMA = telemetryHookSpeedEMA * (1 - HOOK_SPEED_EMA_ALPHA) + hookSpeed * HOOK_SPEED_EMA_ALPHA;
+      }
+    }
+
+    // P1.2: schedule hook trajectory samples T1, T2 sau spawn
+    scheduleHookTrajectory(entity.id, hookSpeed);
+
     // Telemetry: associationMethod counters (P0)
     switch (session.associationMethod) {
       case 'DIRECT_CONFIRMED': telemetry.directConfirmed += 1; break;
@@ -1687,6 +1993,15 @@ function startCleanupInterval() {
     for (const [playerId] of castSessionsByPlayer) {
       getOpenCastSessions(playerId);
     }
+
+    // P1.2: cleanup hookTrajectories cũ (> 10s không có sample mới)
+    for (const [hookId, traj] of hookTrajectories) {
+      const lastSample = traj.samples[traj.samples.length - 1];
+      const ref = lastSample ? lastSample.time : (Date.now() - 10000);
+      if (now - ref > 10000) {
+        cleanupHookTrajectory(hookId);
+      }
+    }
   }, CLEANUP_INTERVAL_TICKS);
 }
 
@@ -1715,7 +2030,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-01-p0-semantics-queue', undefined);
+  log('detector initialized v2026-09-01-p1-fix-trajectory', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);
