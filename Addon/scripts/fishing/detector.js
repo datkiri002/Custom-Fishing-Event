@@ -182,6 +182,22 @@ const telemetry = {
 let telemetryHookSpeedEMA = 0;
 const HOOK_SPEED_EMA_ALPHA = 0.1;
 
+/**
+ * P5.2: vanilla fish trajectory samples (rolling window, max 50).
+ * Mỗi entry: {dH, v_h, v_y, dx, dy, dz, time}. Dùng để self-tune
+ * throwItemToPlayer mỗi 10 catch (regression k_h, k_y).
+ * @type {Array<{dH:number, vH:number, vY:number, dx:number, dy:number, dz:number, time:number}>}
+ */
+const vanillaTrajectorySamples = [];
+const VANILLA_TRAJ_MAX = 50;
+const SELF_TUNE_EVERY = 10;
+
+/** Tuned coefficients (force-origin linear regression). Khởi tạo từ
+ * empirical analysis, update mỗi SELF_TUNE_EVERY catches. */
+let tunedKH = 0.094;
+let tunedKY = 0.09;
+let successSinceTune = 0;
+
 /** P1.2: hookId -> HookTrajectory (samples + derived metrics) */
 const hookTrajectories = new Map();
 
@@ -409,6 +425,34 @@ function dot3D(a, b) {
  * @param {Entity} item
  * @param {Player} player
  */
+/**
+ * P5.2: self-tune k_h, k_y từ rolling window. Force-origin OLS:
+ *   k = Σ(x*y) / Σ(x*x)
+ * Bỏ outlier: chỉ lấy samples với dH trong [0.1, 30] và vY > 0.
+ * @returns {{kH:number, kY:number, n:number}|null}
+ */
+function selfTuneThrowItem() {
+  let sumXXh = 0, sumXYh = 0;
+  let sumXXy = 0, sumXYy = 0;
+  let n = 0;
+  for (const s of vanillaTrajectorySamples) {
+    if (s.dH < 0.1 || s.dH > 30) continue;
+    if (s.vY <= 0) continue;
+    sumXXh += s.dH * s.dH;
+    sumXYh += s.dH * s.vH;
+    sumXXy += s.dH * s.dH;
+    sumXYy += s.dH * s.vY;
+    n += 1;
+  }
+  if (n < 5) return null;
+  const kH = sumXYh / sumXXh;
+  const kY = sumXYy / sumXXy;
+  tunedKH = kH;
+  tunedKY = kY;
+  log(`self-tune kH=${kH.toFixed(4)} kY=${kY.toFixed(4)} n=${n} window=${vanillaTrajectorySamples.length}`);
+  return { kH, kY, n };
+}
+
 export function throwItemToPlayer(item, player) {
   // Debug: log before applyImpulse — so we can compare replacement arc vs
   // vanilla fish arc (logged in onEntitySpawn for item).
@@ -430,13 +474,11 @@ export function throwItemToPlayer(item, player) {
   const horizontalDistance = Math.sqrt(dx * dx + dz * dz);
   if (horizontalDistance < 0.01) return;
 
-  // Fit từ 14 vanilla samples (ChatGPT regression + 3 mới):
-  //   v_h ≈ 0.094 * dH (mean 0.08-0.09 across samples)
-  //   v_y ≈ 0.09 * dH (mean 0.09, range 0.08-0.10)
-  // Bỏ dy (ChatGPT gợi ý dy-driven ballistic underestimate vy khi dy>3).
-  // Tín hiệu: 3 sample mới có vy/dH = 0.097, 0.083, 0.097 → consistent.
-  const v_h = horizontalDistance * 0.094;
-  const v_y = Math.max(0.18, horizontalDistance * 0.09);
+  // Fit từ vanilla samples (P5.2: rolling window regression).
+  //   v_h = tunedKH * dH, v_y = max(0.18, tunedKY * dH)
+  //   tunedKH, tunedKY được update bởi selfTuneThrowItem() mỗi 10 catches.
+  const v_h = horizontalDistance * tunedKH;
+  const v_y = Math.max(0.18, horizontalDistance * tunedKY);
   const dirX = dx / horizontalDistance;
   const dirZ = dz / horizontalDistance;
 
@@ -448,6 +490,12 @@ export function throwItemToPlayer(item, player) {
       z: dirZ * v_h,
     });
   } catch { /* ignore */ }
+  // P5.2: increment success counter, trigger self-tune nếu đủ mốc
+  successSinceTune += 1;
+  if (successSinceTune >= SELF_TUNE_EVERY && vanillaTrajectorySamples.length >= 5) {
+    selfTuneThrowItem();
+    successSinceTune = 0;
+  }
   // Debug: log after applyImpulse — confirm impulse applied + log predicted flight
   log(
     `replacement-trajectory ${dbgItemName} type=${dbgType} ` +
@@ -2066,6 +2114,15 @@ function onEntitySpawn(event) {
   try { entity.setDynamicProperty('fishing_caught', true); } catch { /* ignore */ }
   log(`item spawn ${itemTypeId} id=${entity.id}`, undefined);
 
+  // P5.2: capture vanilla fish trajectory for self-tune. Push vào rolling
+  // window để throwItemToPlayer học theo. Capture CẢ fish, không chỉ salmon/
+  // cod — vanilla physical behavior giống nhau across types.
+  const _ivx = itemCandidate.velocity.x, _ivy = itemCandidate.velocity.y, _ivz = itemCandidate.velocity.z;
+  const _vH = Math.sqrt(_ivx * _ivx + _ivz * _ivz);
+  // dH tạm thời = 0; sẽ update khi contexts loop xong (chỉ push nếu có
+  // context gần player, tránh push outlier xa).
+  // → push thực sự ở dưới, sau khi biết dPlayer.
+
   // Debug: log full trajectory snapshot để user inspect parabola parameters
   // (velocity, direction-to-player, predicted next-tick position). Dùng để
   // tune `applyVelocityToReplacementItem` cho spawn replacement bay về player
@@ -2094,6 +2151,7 @@ function onEntitySpawn(event) {
   }
   for (const ctx of contexts) {
     let playerInfo = '';
+    let _pDx = 0, _pDy = 0, _pDz = 0, _dPlayer = 0, _dH = 0;
     if (ctx.playerId) {
       const player = world.getEntity(ctx.playerId);
       if (player && player.typeId === 'minecraft:player') {
@@ -2103,8 +2161,17 @@ function onEntitySpawn(event) {
         const dz = pLoc.z - itemCandidate.location.z;
         const dPlayer = Math.sqrt(dx * dx + dy * dy + dz * dz);
         const dDir = dPlayer > 0.01 ? { x: dx / dPlayer, y: dy / dPlayer, z: dz / dPlayer } : { x: 0, y: 0, z: 0 };
+        _pDx = dx; _pDy = dy; _pDz = dz; _dPlayer = dPlayer;
+        _dH = Math.sqrt(dx * dx + dz * dz); // horizontal distance
         playerInfo = `playerLoc=(${pLoc.x.toFixed(2)},${pLoc.y.toFixed(2)},${pLoc.z.toFixed(2)}) ` +
           `dPlayer=${dPlayer.toFixed(2)} dirToPlayer=(${dDir.x.toFixed(2)},${dDir.y.toFixed(2)},${dDir.z.toFixed(2)}) `;
+      }
+    }
+    // P5.2: push vanilla sample (chỉ khi có player context để biết dH).
+    if (_dH > 0.1 && _vH > 0.01) {
+      vanillaTrajectorySamples.push({ dH: _dH, vH: _vH, vY: _ivy, dx: _pDx, dy: _pDy, dz: _pDz, time: Date.now() });
+      while (vanillaTrajectorySamples.length > VANILLA_TRAJ_MAX) {
+        vanillaTrajectorySamples.shift();
       }
     }
     log(
@@ -2428,7 +2495,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-01-p5-item-fit-arc-v6', undefined);
+  log('detector initialized v2026-09-01-p5-item-self-tune', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);
