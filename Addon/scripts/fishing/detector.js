@@ -189,6 +189,17 @@ const hookTrajectories = new Map();
 const boundHookBySessionId = new Map();
 
 /**
+ * P4.2: Hysteresis — committed assignment per hook. Khi 1 hook đã được
+ * assigned (CONFIRMED), cache decision trong TTL. Nếu hook bị re-evaluate
+ * trong TTL (e.g. bởi extra spawn event), skip re-assignment trừ khi
+ * evidence mới thay đổi mạnh (delta > REASSIGN_EVIDENCE_DELTA).
+ * @type {Map<string, {playerId:string, score:number, confidence:ConfidenceState, expiresAt:number, lockedAt:number}>}
+ */
+const committedAssignments = new Map();
+const COMMITTED_ASSIGNMENT_TTL_MS = 5000;
+const REASSIGN_EVIDENCE_DELTA = 200;
+
+/**
  * P2.3: Causal chain log. Map<hookId, chainEvents[]>.
  * Mỗi entry ghi timeline: cast → hook spawn → hook active → reel → item spawn
  * → hook remove. Dùng cho debug + post-mortem analysis.
@@ -973,7 +984,14 @@ function assessCastHookAssociation(hook, player, session, hookVelocity) {
  * @param {Vector3} hookVelocity
  * @returns {{ top: CastAssessment | null, second: CastAssessment | null }}
  */
-function selectBestCastSession(hook, hookVelocity) {
+/**
+ * Build assessments pool: scan castSessionsByPlayer + pendingBeforeQueue.
+ * P4.1: skip sessions already bound to another hook (boundHookBySessionId).
+ * @param {Entity} hook
+ * @param {Vector3} hookVelocity
+ * @returns {CastAssessment[]}
+ */
+function buildAssessments(hook, hookVelocity) {
   const now = Date.now();
   /** @type {CastAssessment[]} */
   const assessments = [];
@@ -991,6 +1009,9 @@ function selectBestCastSession(hook, hookVelocity) {
     if (!player || player.typeId !== 'minecraft:player') continue;
 
     for (const session of kept) {
+      // P4.1: skip session already bound to another hook (P2.5 exclusivity)
+      if (boundHookBySessionId.has(session.sessionId)) continue;
+
       const anchorTick = session.before?.tick ?? session.after?.tick;
       const anchorLoc = session.before?.location ?? session.after?.location;
 
@@ -1009,7 +1030,6 @@ function selectBestCastSession(hook, hookVelocity) {
       const headLoc = session.before?.headLocation ?? session.after?.headLocation;
       if (viewDir && headLoc) {
         const { projection, perpendicularError } = projectOntoRay(headLoc, viewDir, hook.location);
-        // Hook ở phía sau (projection < 0) VÀ perpendicular > ngưỡng → reject
         if (projection < -2 && perpendicularError > CAST_RAY_MAX_PERPENDICULAR) continue;
       }
       // G5: viewDirection required
@@ -1020,31 +1040,23 @@ function selectBestCastSession(hook, hookVelocity) {
     }
   }
 
-  // P0 race fix v2: scan pending BEFORE snapshots. Mỗi entry được build
-  // thành synthetic session on-the-fly, KHÔNG push vào castSessionsByPlayer.
-  // Chỉ assess nếu hook spawn trước afterEvents.itemUse (race case).
+  // P0 race fix v2: scan pending BEFORE snapshots
   for (const [playerId, queue] of pendingBeforeQueue) {
     const player = world.getEntity(playerId);
     if (!player || player.typeId !== 'minecraft:player') continue;
 
     for (const before of queue) {
-      // G1: dimension
       if (before.dimensionId !== hook.dimension.id) continue;
-      // G2: tick window
       const tickDelta = Math.abs(system.currentTick - before.tick);
       if (tickDelta > CAST_TO_HOOK_TICK_WINDOW) continue;
-      // G3: distance
       const distance = distance3D(before.location, hook.location);
       if (distance > CAST_TO_HOOK_DISTANCE) continue;
-      // G4: ray check
       if (before.viewDirection && before.headLocation) {
         const { projection, perpendicularError } = projectOntoRay(before.headLocation, before.viewDirection, hook.location);
         if (projection < -2 && perpendicularError > CAST_RAY_MAX_PERPENDICULAR) continue;
       }
-      // G5: viewDirection required
       if (!before.viewDirection) continue;
 
-      // Build synthetic session, KHÔNG push vào pool
       const synthetic = makeSyntheticSession(player, before);
       const assessment = assessCastHookAssociation(hook, player, synthetic, hookVelocity);
       if (assessment) {
@@ -1053,6 +1065,47 @@ function selectBestCastSession(hook, hookVelocity) {
       }
     }
   }
+
+  return assessments;
+}
+
+/**
+ * P4.2: Reconstruct assessment từ committed cache. Dùng khi hysteresis lock
+ * active — return CastAssessment với score/player giữ nguyên.
+ * @param {{playerId:string, score:number, confidence:ConfidenceState}} committed
+ * @returns {CastAssessment}
+ */
+function assessmentsFromCommitted(committed) {
+  return {
+    session: /** @type {CastSession} */ ({}),
+    playerId: committed.playerId,
+    confidence: committed.confidence,
+    score: committed.score,
+    evidence: /** @type {EvidenceBreakdown} */ ({}),
+  };
+}
+
+function selectBestCastSession(hook, hookVelocity) {
+  const now = Date.now();
+
+  // P4.2: hysteresis — nếu hook đã committed trong TTL, return cache trừ
+  // khi evidence mới thay đổi mạnh. Tránh re-evaluation do duplicate event.
+  const committed = committedAssignments.get(hook.id);
+  if (committed && now <= committed.expiresAt) {
+    // Re-evaluate nhanh để xem có nên override
+    const freshAssessments = buildAssessments(hook, hookVelocity);
+    const freshTop = freshAssessments.sort((a, b) => b.score - a.score)[0];
+    if (!freshTop || freshTop.score < committed.score + REASSIGN_EVIDENCE_DELTA) {
+      // Cache vẫn hợp lệ — return locked decision
+      const locked = assessmentsFromCommitted(committed);
+      return { top: locked, second: null, locked: true };
+    }
+    // Nếu có candidate mới mạnh hơn nhiều → fall through, update cache
+    committedAssignments.delete(hook.id);
+  }
+
+  /** @type {CastAssessment[]} */
+  const assessments = buildAssessments(hook, hookVelocity);
 
   if (assessments.length === 0) return { top: null, second: null };
 
@@ -1084,6 +1137,18 @@ function selectBestCastSession(hook, hookVelocity) {
     // confidence=UNKNOWN để caller log evidence. Caller (onEntitySpawn) sẽ
     // check confidence và fall through to fallback heuristic.
     telemetry.nullAssignments += 1;
+  }
+
+  // P4.2: cache committed assignment nếu CONFIRMED. AMBIGUOUS/UNKNOWN không
+  // cache (cần re-evaluate khi có evidence mới).
+  if (top.confidence === 'CONFIRMED') {
+    committedAssignments.set(hook.id, {
+      playerId: top.playerId,
+      score: top.score,
+      confidence: top.confidence,
+      expiresAt: now + COMMITTED_ASSIGNMENT_TTL_MS,
+      lockedAt: now,
+    });
   }
 
   return { top, second };
@@ -2132,6 +2197,8 @@ function onBeforeEntityRemove(event) {
     boundHookBySessionId.delete(session.sessionId);
   }
   cleanupHookTrajectory(entity.id);
+  // P4.2: cleanup hysteresis cache
+  committedAssignments.delete(entity.id);
   // P2.3: log final causal chain, sau đó cleanup
   if (session) {
     recordCausal(entity.id, 'hook_remove', { playerId: session.playerId, state: session.state });
@@ -2262,7 +2329,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-01-p3-workflow-stress', undefined);
+  log('detector initialized v2026-09-01-p4-hysteresis-global', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);
