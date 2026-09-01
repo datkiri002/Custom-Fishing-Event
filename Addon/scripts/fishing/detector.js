@@ -109,8 +109,11 @@ const hooksByPlayer = new Map();
 const castSessionsByPlayer = new Map();
 /** sessionId -> CastSession (lookup nhanh) */
 const castSessionsById = new Map();
-/** playerId -> CastSnapshot (BEFORE snapshot chờ AFTER event) */
-const pendingBeforeSnapshots = new Map();
+/** playerId -> CastSnapshot[] (queue pending BEFORE, không overwrite).
+ *  Mỗi BEFORE ItemUse tạo entry mới; registerCastSession pop phù hợp nhất. */
+const pendingBeforeQueue = new Map();
+/** playerId -> next sequenceId (monotonic, mỗi BEFORE cast tăng 1) */
+const sequenceByPlayer = new Map();
 /** hookId -> removed hook awaiting item correlation */
 const pending = new Map();
 /** entityId -> item candidate */
@@ -123,6 +126,18 @@ function newSessionId() {
   return `s${sessionIdCounter}`;
 }
 
+/**
+ * Per-player monotonic sequence. Mỗi BEFORE ItemUse tăng 1.
+ * Dùng để disambiguate rapid cast / same-tick events.
+ * @param {string} playerId
+ * @returns {number}
+ */
+function nextSequence(playerId) {
+  const next = (sequenceByPlayer.get(playerId) ?? 0) + 1;
+  sequenceByPlayer.set(playerId, next);
+  return next;
+}
+
 export const catchSignal = new FishingEventSignal();
 export const castSignal = new FishingEventSignal();
 export const reelSignal = new FishingEventSignal();
@@ -132,11 +147,25 @@ export const beforeCatchSignal = new FishingEventSignal();
 // ===== Telemetry counters (precision/recall tracking) =====
 const telemetry = {
   totalHooks: 0,
+  // confidence (Stage 1 evidence-based)
   confirmed: 0,
   ambiguous: 0,
   unknown: 0,
+  // fallback (heuristic)
   fallback: 0,
   skipped: 0,
+  // association method (semantic, P0)
+  directConfirmed: 0,    // DIRECT_CONFIRMED
+  directAmbiguous: 0,    // DIRECT_AMBIGUOUS
+  tentative: 0,          // TENTATIVE (backfill)
+  fallbackSem: 0,        // FALLBACK (heuristic)
+  unknownSem: 0,         // UNKNOWN
+  // race fix v2
+  raceFixSynthetic: 0,   // hook dùng pending BEFORE (synthetic session)
+  // pending queue (P0)
+  pendingBeforeEnqueued: 0,
+  pendingBeforeMatched: 0,
+  pendingBeforeExpired: 0,
 };
 
 /** @param {string} msg @param {string|undefined} [ownerId] */
@@ -293,29 +322,69 @@ function captureSnapshot(player) {
 }
 
 /**
- * Lưu BEFORE snapshot chờ AFTER event link tới.
+ * Lưu BEFORE snapshot vào queue. KHÔNG overwrite snapshot trước — mỗi
+ * BEFORE ItemUse tạo entry mới. Cleanup TTL sẽ drop stale entries.
  * @param {Player} player
  * @returns {CastSnapshot}
  */
 function captureBeforeSnapshot(player) {
   const snap = captureSnapshot(player);
-  pendingBeforeSnapshots.set(player.id, snap);
+  snap.sequenceId = nextSequence(player.id);
+  const queue = pendingBeforeQueue.get(player.id) ?? [];
+  // Drop stale entries (> 5s) trước khi push
+  const cutoff = Date.now() - 5000;
+  while (queue.length > 0 && (queue[0].time ?? 0) < cutoff) {
+    queue.shift();
+    telemetry.pendingBeforeExpired += 1;
+  }
+  queue.push(snap);
+  pendingBeforeQueue.set(player.id, queue);
+  telemetry.pendingBeforeEnqueued += 1;
   return snap;
 }
 
 /**
- * Hoàn thiện 1 CastSession: tạo mới hoặc complete (link BEFORE + AFTER).
- * Trước đây gọi là `registerCastCandidate`. Giờ mỗi session = 1 lần Rod use.
+ * Pop BEFORE snapshot phù hợp nhất với AFTER hiện tại. Match rule (P0):
+ *  1. Cùng dimensionId (BẮT BUỘC)
+ *  2. |after.tick - before.tick| ≤ 5 (stale guard)
+ *  3. before.time ≤ after.time (BEFORE phải xảy ra trước AFTER)
+ *  4. Chọn entry mới nhất pass điều kiện (queue tail → head scan ngược)
+ *
+ * KHÔNG dùng "lấy entry cuối cùng" vì có thể snapshot stale từ rapid cast
+ * trước. Nếu không match → return null (session vẫn được tạo, sequenceId
+ * được generate mới).
+ * @param {Player} player
+ * @param {CastSnapshot} after
+ * @returns {CastSnapshot | null}
+ */
+function popPendingBefore(player, after) {
+  const queue = pendingBeforeQueue.get(player.id);
+  if (!queue || queue.length === 0) return null;
+  for (let i = queue.length - 1; i >= 0; i--) {
+    const cand = queue[i];
+    if (cand.dimensionId !== after.dimensionId) continue;
+    if (Math.abs(after.tick - cand.tick) > 5) continue;
+    if ((cand.time ?? 0) > after.time) continue;
+    queue.splice(i, 1);
+    telemetry.pendingBeforeMatched += 1;
+    return cand;
+  }
+  return null;
+}
+
+/**
+ * Hoàn thiện 1 CastSession: link BEFORE (từ queue) + AFTER (current snapshot).
  * @param {Player} player
  * @returns {CastSession}
  */
 function registerCastSession(player) {
   const after = captureSnapshot(player);
-  const before = pendingBeforeSnapshots.get(player.id);
+  const before = popPendingBefore(player, after);
   /** @type {CastSession} */
   const session = {
     sessionId: newSessionId(),
     playerId: player.id,
+    sequenceId: before?.sequenceId,
     dimensionId: player.dimension.id,
     after,
     createdAt: Date.now(),
@@ -330,17 +399,13 @@ function registerCastSession(player) {
                 before.viewDirection.y * after.viewDirection.y +
                 before.viewDirection.z * after.viewDirection.z;
     session.directionAngleDelta = Math.acos(clamp(dot, -1, 1));
-    // Player consistency: càng ít drift càng tốt
-    // positionDelta ≤ 0.5 + angleDelta ≤ 0.3 rad → 100
-    // tăng đều khi drift
     const posScore = clamp(100 * (1 - session.positionDelta / 2.0), 0, 100);
     const angScore = clamp(100 * (1 - session.directionAngleDelta / 0.6), 0, 100);
     session.playerConsistency = Math.round((posScore + angScore) / 2);
   } else {
-    // Không có BEFORE (race condition) → consistency thấp
+    // Không có BEFORE match → consistency thấp
     session.playerConsistency = 30;
   }
-  pendingBeforeSnapshots.delete(player.id);
 
   // Push vào pool
   const sessions = getOpenCastSessions(player.id);
@@ -378,7 +443,8 @@ function backfillFallbackCast(player) {
   const sessions = getSessionsForPlayer(player.id);
   const candidates = sessions.filter((session) =>
     !session.castConfirmed &&
-    session.associationMethod !== 'DIRECT' &&
+    session.associationMethod !== 'DIRECT_CONFIRMED' &&
+    session.associationMethod !== 'DIRECT_AMBIGUOUS' &&
     system.currentTick - session.hookSpawnTick <= 2
   );
   // Chỉ lấy 1 hook mới nhất (theo hookSpawnTick)
@@ -386,7 +452,10 @@ function backfillFallbackCast(player) {
   candidates.sort((a, b) => b.hookSpawnTick - a.hookSpawnTick);
   const session = candidates[0];
 
-  const before = pendingBeforeSnapshots.get(player.id);
+  // P0: pop từ queue (không dùng Map.get cũ)
+  const queue = pendingBeforeQueue.get(player.id) ?? [];
+  const before = queue.length > 0 ? queue.shift() : undefined;
+  if (before) telemetry.pendingBeforeMatched += 1;
   session.castLocation = cloneVector(player.location);
   session.castTime = Date.now();
   session.castTick = system.currentTick;
@@ -397,7 +466,6 @@ function backfillFallbackCast(player) {
     session.castViewDirection = cloneVector(before.viewDirection);
     session.castPlayerVelocity = cloneVector(before.velocity);
   }
-  pendingBeforeSnapshots.delete(player.id);
 
   castSignal.trigger({
     player,
@@ -650,6 +718,40 @@ function selectBestCastSession(hook, hookVelocity) {
 
       const assessment = assessCastHookAssociation(hook, player, session, hookVelocity);
       if (assessment) assessments.push(assessment);
+    }
+  }
+
+  // P0 race fix v2: scan pending BEFORE snapshots. Mỗi entry được build
+  // thành synthetic session on-the-fly, KHÔNG push vào castSessionsByPlayer.
+  // Chỉ assess nếu hook spawn trước afterEvents.itemUse (race case).
+  for (const [playerId, queue] of pendingBeforeQueue) {
+    const player = world.getEntity(playerId);
+    if (!player || player.typeId !== 'minecraft:player') continue;
+
+    for (const before of queue) {
+      // G1: dimension
+      if (before.dimensionId !== hook.dimension.id) continue;
+      // G2: tick window
+      const tickDelta = Math.abs(system.currentTick - before.tick);
+      if (tickDelta > CAST_TO_HOOK_TICK_WINDOW) continue;
+      // G3: distance
+      const distance = distance3D(before.location, hook.location);
+      if (distance > CAST_TO_HOOK_DISTANCE) continue;
+      // G4: ray check
+      if (before.viewDirection && before.headLocation) {
+        const { projection, perpendicularError } = projectOntoRay(before.headLocation, before.viewDirection, hook.location);
+        if (projection < -2 && perpendicularError > CAST_RAY_MAX_PERPENDICULAR) continue;
+      }
+      // G5: viewDirection required
+      if (!before.viewDirection) continue;
+
+      // Build synthetic session, KHÔNG push vào pool
+      const synthetic = makeSyntheticSession(player, before);
+      const assessment = assessCastHookAssociation(hook, player, synthetic, hookVelocity);
+      if (assessment) {
+        assessments.push(assessment);
+        telemetry.raceFixSynthetic += 1;
+      }
     }
   }
 
@@ -1311,58 +1413,42 @@ function onFishingRodUse(event) {
   );
 }
 
+/**
+ * Build synthetic CastSession từ pending BEFORE snapshot. Dùng cho race case
+ * khi hook spawn TRƯỚC afterEvents.itemUse → CastSession thật chưa được
+ * registerCastSession tạo.
+ *
+ * QUAN TRỌNG: synthetic session KHÔNG push vào castSessionsByPlayer.
+ * `selectBestCastSession` tạo fresh mỗi lần assessment, không lưu lại.
+ * Tránh "tạo hàng loạt CastSession giả chỉ vì 1 hook spawn" (P0 fix).
+ * @param {Player} player
+ * @param {CastSnapshot} before
+ * @returns {CastSession}
+ */
+function makeSyntheticSession(player, before) {
+  const after = captureSnapshot(player);
+  /** @type {CastSession} */
+  const session = {
+    sessionId: `pending-${before.sequenceId ?? 0}`,
+    playerId: player.id,
+    sequenceId: before.sequenceId,
+    dimensionId: before.dimensionId,
+    before,
+    after,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + CAST_TTL_MS,
+    playerConsistency: 50,
+    synthetic: true,
+  };
+  return session;
+}
+
 /** @param {import('@minecraft/server').EntitySpawnAfterEvent} event */
 function onEntitySpawn(event) {
   const entity = event.entity;
   if (entity.typeId === 'minecraft:fishing_hook') {
-    // RACE FIX: nếu hook spawn TRƯỚC khi afterEvents.itemUse chạy, AFTER
-    // session chưa được build. Quét pendingBeforeSnapshots → build session
-    // ngay với AFTER = snapshot tại spawn moment.
-    const now = Date.now();
-    for (const [pid, before] of pendingBeforeSnapshots) {
-      const p = world.getEntity(pid);
-      if (!p || p.typeId !== 'minecraft:player') continue;
-      if (p.dimension.id !== entity.dimension.id) continue;
-      // Player có pendingBefore → likely vừa cast trong tick này
-      // Build session ngay nếu chưa có session mới
-      const existing = getOpenCastSessions(pid);
-      const lastSession = existing[existing.length - 1];
-      const lastTick = lastSession?.after?.tick ?? -1;
-      if (lastTick >= before.tick) continue;  // đã có session mới hơn
-
-      // Capture AFTER tại spawn moment
-      const after = captureSnapshot(/** @type {Player} */ (p));
-      /** @type {CastSession} */
-      const session = {
-        sessionId: newSessionId(),
-        playerId: pid,
-        dimensionId: p.dimension.id,
-        before,
-        after,
-        createdAt: now,
-        expiresAt: now + CAST_TTL_MS,
-      };
-      session.beforeAfterTimeDelta = after.time - before.time;
-      session.beforeAfterTickDelta = after.tick - before.tick;
-      session.positionDelta = distance3D(before.location, after.location);
-      const dot = before.viewDirection.x * after.viewDirection.x +
-                  before.viewDirection.y * after.viewDirection.y +
-                  before.viewDirection.z * after.viewDirection.z;
-      session.directionAngleDelta = Math.acos(clamp(dot, -1, 1));
-      const posScore = clamp(100 * (1 - session.positionDelta / 2.0), 0, 100);
-      const angScore = clamp(100 * (1 - session.directionAngleDelta / 0.6), 0, 100);
-      session.playerConsistency = Math.round((posScore + angScore) / 2);
-
-      existing.push(session);
-      castSessionsByPlayer.set(pid, existing);
-      castSessionsById.set(session.sessionId, session);
-      log(
-        `cast session (race-fix) player=${p.name} sessionId=${session.sessionId} ` +
-        `tick=${after.tick} consistency=${session.playerConsistency}`,
-        pid
-      );
-    }
-
+    // P0 race fix v2: KHÔNG materialize session cho mọi pending player.
+    // Để selectBestCastSession tự build synthetic session on-the-fly nếu cần.
     const hookVelocity = safeGetVelocity(entity);
     const { top, second } = selectBestCastSession(entity, hookVelocity);
 
@@ -1426,9 +1512,11 @@ function onEntitySpawn(event) {
       playerId: player.id,
       dimensionId: entity.dimension.id,
       sessionId: castSession?.sessionId,
+      // P0 fix: tách DIRECT_CONFIRMED vs DIRECT_AMBIGUOUS. AMBIGUOUS KHÔNG
+      // phải confirmed owner.
       associationMethod:
-        confidence === 'CONFIRMED' ? 'DIRECT' :
-        confidence === 'AMBIGUOUS' ? 'DIRECT' :
+        confidence === 'CONFIRMED' ? 'DIRECT_CONFIRMED' :
+        confidence === 'AMBIGUOUS' ? 'DIRECT_AMBIGUOUS' :
         confidence === 'FALLBACK' ? 'FALLBACK' : 'UNKNOWN',
       castLocation: cloneVector(castLoc),
       castTime,
@@ -1440,7 +1528,9 @@ function onEntitySpawn(event) {
       hookSpawnTime: Date.now(),
       hookSpawnTick: system.currentTick,
       lastKnownPlayerLocation: cloneVector(player.location),
-      castConfirmed: Boolean(castSession),
+      // P0 fix: castConfirmed CHỈ true khi CONFIRMED. AMBIGUOUS/TENTATIVE/
+      // FALLBACK/UNKNOWN → false.
+      castConfirmed: confidence === 'CONFIRMED',
       inventoryChanged: false,
       state: 'CASTING',
       confidence,
@@ -1449,16 +1539,26 @@ function onEntitySpawn(event) {
     trackSession(session);
     transition(session, 'FISHING');
 
-    // Telemetry
+    // Telemetry: confidence counters
     telemetry.totalHooks += 1;
     if (confidence === 'CONFIRMED') telemetry.confirmed += 1;
     else if (confidence === 'AMBIGUOUS') telemetry.ambiguous += 1;
     else if (confidence === 'FALLBACK') telemetry.fallback += 1;
     else telemetry.unknown += 1;
 
+    // Telemetry: associationMethod counters (P0)
+    switch (session.associationMethod) {
+      case 'DIRECT_CONFIRMED': telemetry.directConfirmed += 1; break;
+      case 'DIRECT_AMBIGUOUS': telemetry.directAmbiguous += 1; break;
+      case 'TENTATIVE': telemetry.tentative += 1; break;
+      case 'FALLBACK': telemetry.fallbackSem += 1; break;
+      default: telemetry.unknownSem += 1;
+    }
+
     if (DEBUG) {
       log(
         `hook spawn ${entity.id} owner=${player.name} confidence=${confidence} ` +
+        `associationMethod=${session.associationMethod} castConfirmed=${session.castConfirmed} ` +
         `score=${top?.score ?? 0} margin=${top ? top.score - (second?.score ?? 0) : 0} ` +
         `T=${evidence?.temporal ?? 0} S=${evidence?.spatial ?? 0} ` +
         `R=${evidence?.rayProjection ?? 0} A=${evidence?.angular ?? 0} ` +
@@ -1615,7 +1715,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-01-race-fix-castsession', undefined);
+  log('detector initialized v2026-09-01-p0-semantics-queue', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);

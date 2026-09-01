@@ -30,6 +30,11 @@
  * @property {number} tick                system.currentTick
  * @property {number} time                Date.now() — bổ trợ/debug
  * @property {number} dimensionId         Dimension ID
+ * @property {number} [sequenceId]        Per-player monotonic counter. Mỗi
+ *                                        BEFORE ItemUse tạo 1 sequence mới
+ *                                        (không overwrite). Dùng để match
+ *                                        BEFORE→AFTER trong rapid cast /
+ *                                        same-tick events.
  */
 
 /**
@@ -43,6 +48,8 @@
  * @typedef {Object} CastSession
  * @property {string} sessionId          Unique ID cho session
  * @property {string} playerId
+ * @property {number} [sequenceId]        Kế thừa từ before.sequenceId. Dùng
+ *                                        để disambiguate rapid cast / same-tick.
  * @property {string} dimensionId
  * @property {CastSnapshot} [before]     Snapshot tại beforeEvents.itemUse
  * @property {CastSnapshot} [after]      Snapshot tại afterEvents.itemUse
@@ -52,6 +59,12 @@
  * @property {number} [directionAngleDelta] angle giữa before.viewDirection và after.viewDirection (radian)
  * @property {number} [playerConsistency] 0-100, snapshot reliability
  *                                        (cao = before→after consistent, snapshot tin cậy)
+ * @property {boolean} [synthetic]        True nếu session được build từ
+ *                                        pending BEFORE (race case: hook
+ *                                        spawn trước afterEvents.itemUse).
+ *                                        Synthetic session KHÔNG push vào
+ *                                        castSessionsByPlayer — chỉ dùng
+ *                                        cho assessment on-the-fly.
  * @property {number} createdAt          Date.now() tạo session
  * @property {number} expiresAt          Date.now() hết hạn
  */
@@ -62,8 +75,11 @@
  * @property {string} playerId
  * @property {string} dimensionId
  * @property {string} [sessionId]            CastSession reference (nếu có direct association)
- * @property {'DIRECT' | 'FALLBACK' | 'TENTATIVE' | 'UNKNOWN'} [associationMethod]
- *                                          Cách hook→player được xác định
+ * @property {'DIRECT_CONFIRMED' | 'DIRECT_AMBIGUOUS' | 'TENTATIVE' | 'FALLBACK' | 'UNKNOWN'} [associationMethod]
+ *                                          Cách hook→player được xác định.
+ *                                          P0 fix: tách DIRECT_CONFIRMED vs
+ *                                          DIRECT_AMBIGUOUS để semantic rõ —
+ *                                          AMBIGUOUS KHÔNG phải confirmed owner.
  * @property {Vector3} castLocation
  * @property {number} castTime
  * @property {number} castTick
@@ -74,7 +90,10 @@
  * @property {number} hookSpawnTime
  * @property {number} hookSpawnTick
  * @property {Vector3} lastKnownPlayerLocation
- * @property {boolean} castConfirmed
+ * @property {boolean} castConfirmed          P0 fix: CHỈ true khi
+ *                                            associationMethod = 'DIRECT_CONFIRMED'.
+ *                                            AMBIGUOUS/TENTATIVE/FALLBACK/UNKNOWN
+ *                                            → castConfirmed = false.
  * @property {boolean} inventoryChanged
  * @property {FishingState} state
  * @property {ConfidenceState} [confidence]  Owner confidence: CONFIRMED | AMBIGUOUS | FALLBACK | UNKNOWN
