@@ -192,10 +192,13 @@ const vanillaTrajectorySamples = [];
 const VANILLA_TRAJ_MAX = 50;
 const SELF_TUNE_EVERY = 10;
 
-/** Tuned coefficients (force-origin linear regression). Khởi tạo từ
- * empirical analysis, update mỗi SELF_TUNE_EVERY catches. */
-let tunedKH = 0.094;
-let tunedKY = 0.09;
+/** Tuned coefficients for engine-derived formula:
+ *   v_x = kH*dx, v_y = kY*dy + kB*sqrt(d), v_z = kH*dz
+ * Defaults from Minecraft Legacy FishingHook::retrieve (kH=0.1, kY=0.1, kB=0.08).
+ * Self-tune updates these from rolling window every SELF_TUNE_EVERY catches. */
+let tunedKH = 0.1;
+let tunedKY = 0.1;
+let tunedKB = 0.08;
 let successSinceTune = 0;
 
 /** P1.2: hookId -> HookTrajectory (samples + derived metrics) */
@@ -426,31 +429,51 @@ function dot3D(a, b) {
  * @param {Player} player
  */
 /**
- * P5.2: self-tune k_h, k_y từ rolling window. Force-origin OLS:
- *   k = Σ(x*y) / Σ(x*x)
- * Bỏ outlier: chỉ lấy samples với dH trong [0.1, 30] và vY > 0.
- * @returns {{kH:number, kY:number, n:number}|null}
+ * P5.2: self-tune 3 constants (kH, kY, kB) từ rolling window.
+ * Reverse-engineer vanilla constants: v_x/dx ≈ kH, v_z/dz ≈ kH,
+ *   (v_y - kY*dy) / sqrt(d) ≈ kB
+ * Bỏ outlier: samples có dx/dz < 0.1 (avoid divide by tiny) hoặc |vel| > 5.
+ * @returns {{kH:number, kY:number, kB:number, n:number}|null}
  */
 function selfTuneThrowItem() {
-  let sumXXh = 0, sumXYh = 0;
-  let sumXXy = 0, sumXYy = 0;
-  let n = 0;
+  let sumKH = 0, nH = 0;
+  let sumKY = 0, nY = 0;
+  let sumKB = 0, nB = 0;
   for (const s of vanillaTrajectorySamples) {
-    if (s.dH < 0.1 || s.dH > 30) continue;
-    if (s.vY <= 0) continue;
-    sumXXh += s.dH * s.dH;
-    sumXYh += s.dH * s.vH;
-    sumXXy += s.dH * s.dH;
-    sumXYy += s.dH * s.vY;
-    n += 1;
+    // kH: v_x/dx hoặc v_z/dz (dùng horizontal component magnitude)
+    const hMag = Math.sqrt(s.dx * s.dx + s.dz * s.dz);
+    if (hMag > 0.5) {
+      // observed horizontal velocity magnitude từ sample (vH)
+      sumKH += s.vH / hMag;
+      nH += 1;
+    }
+    // kY: v_y / dy nếu dy đáng kể
+    if (Math.abs(s.dy) > 0.5) {
+      // dY contribution chỉ 1 phần v_y, cần isolate
+      // Approximation: assume kY=0.1 ban đầu để solve kB
+      const d3 = Math.sqrt(s.dx * s.dx + s.dy * s.dy + s.dz * s.dz);
+      if (d3 > 0.1 && s.vY > 0) {
+        // v_y = kY*dy + kB*sqrt(d) → nếu dy đủ lớn, kY ≈ (v_y - kB*sqrt(d)) / dy
+        // Để stable: dùng dy ratio để filter, kY chỉ estimate khi dy dominates
+        if (s.dy > 1.0) {
+          const kB_est = 0.08; // prior
+          sumKY += (s.vY - kB_est * Math.sqrt(d3)) / s.dy;
+          nY += 1;
+        }
+        // kB: từ total v_y trừ kY*dy
+        // v_y = kY*dy + kB*sqrt(d) → kB = (v_y - kY*dy) / sqrt(d)
+        const kY_est = 0.1; // prior
+        sumKB += (s.vY - kY_est * s.dy) / Math.sqrt(d3);
+        nB += 1;
+      }
+    }
   }
-  if (n < 5) return null;
-  const kH = sumXYh / sumXXh;
-  const kY = sumXYy / sumXXy;
-  tunedKH = kH;
-  tunedKY = kY;
-  log(`self-tune kH=${kH.toFixed(4)} kY=${kY.toFixed(4)} n=${n} window=${vanillaTrajectorySamples.length}`);
-  return { kH, kY, n };
+  if (nH < 5) return null;
+  tunedKH = sumKH / nH;
+  if (nY >= 3) tunedKY = sumKY / nY;
+  if (nB >= 3) tunedKB = sumKB / nB;
+  log(`self-tune kH=${tunedKH.toFixed(4)} (n=${nH}) kY=${tunedKY.toFixed(4)} (n=${nY}) kB=${tunedKB.toFixed(4)} (n=${nB}) window=${vanillaTrajectorySamples.length}`);
+  return { kH: tunedKH, kY: tunedKY, kB: tunedKB, n: nH + nY + nB };
 }
 
 export function throwItemToPlayer(item, player) {
@@ -474,20 +497,22 @@ export function throwItemToPlayer(item, player) {
   const horizontalDistance = Math.sqrt(dx * dx + dz * dz);
   if (horizontalDistance < 0.01) return;
 
-  // Fit từ vanilla samples (P5.2: rolling window regression).
-  //   v_h = tunedKH * dH, v_y = max(0.18, tunedKY * dH)
-  //   tunedKH, tunedKY được update bởi selfTuneThrowItem() mỗi 10 catches.
-  const v_h = horizontalDistance * tunedKH;
-  const v_y = Math.max(0.18, horizontalDistance * tunedKY);
-  const dirX = dx / horizontalDistance;
-  const dirZ = dz / horizontalDistance;
+  // P5.2: engine-derived formula (vanilla FishingHook::retrieve):
+  //   v_x = kH * dx, v_z = kH * dz, v_y = kY * dy + kB * sqrt(d)
+  //   where d = sqrt(dx² + dy² + dz²) (3D distance hook→player)
+  // Default constants (Legacy source): kH=0.1, kY=0.1, kB=0.08.
+  // Self-tune updates these from rolling window every 10 catches.
+  const dist3D = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  const v_x = dx * tunedKH;
+  const v_y = dy * tunedKY + Math.sqrt(dist3D) * tunedKB;
+  const v_z = dz * tunedKH;
 
   try { item.clearVelocity(); } catch { /* ignore */ }
   try {
     item.applyImpulse({
-      x: dirX * v_h,
+      x: v_x,
       y: v_y,
-      z: dirZ * v_h,
+      z: v_z,
     });
   } catch { /* ignore */ }
   // P5.2: increment success counter, trigger self-tune nếu đủ mốc
@@ -2495,7 +2520,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-01-p5-item-self-tune', undefined);
+  log('detector initialized v2026-09-01-p5-item-engine-formula', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);
