@@ -2040,8 +2040,9 @@ function onEntitySpawn(event) {
   try { entity.setDynamicProperty('fishing_caught', true); } catch { /* ignore */ }
   log(`item spawn ${itemTypeId} id=${entity.id}`, undefined);
 
-  // P2.3: item_spawn causal event. Gắn vào chain của TỪNG active session có
-  // hook gần item (dùng spatial proximity để không gắn nhầm).
+  // P2.3 + P5.1: item_spawn causal event. Gắn vào chain của TỪNG active
+  // session HOẶC removed hook (vanilla pickup spawns item SAU hook_remove)
+  // có distance gần item.
   for (const session of sessionsByHook.values()) {
     if (session.state === 'SUCCESS' || session.state === 'CANCELLED' || session.state === 'EMPTY_REEL') continue;
     if (session.dimensionId !== entity.dimension.id) continue;
@@ -2051,6 +2052,19 @@ function onEntitySpawn(event) {
         itemId: entity.id,
         itemTypeId,
         dist: d.toFixed(2),
+      });
+    }
+  }
+  // P5.1: scan removedHook (pending) — item spawn có thể xảy ra sau hook_remove
+  for (const removedHook of pending.values()) {
+    if (removedHook.dimensionId !== entity.dimension.id) continue;
+    const d = distance3D(removedHook.location, entity.location);
+    if (d <= MAX_HOOK_TO_ITEM_DISTANCE * 1.5) {
+      recordCausal(removedHook.hookId, 'item_spawn', {
+        itemId: entity.id,
+        itemTypeId,
+        dist: d.toFixed(2),
+        postRemove: true,
       });
     }
   }
@@ -2203,11 +2217,18 @@ function onBeforeEntityRemove(event) {
   if (session) {
     recordCausal(entity.id, 'hook_remove', { playerId: session.playerId, state: session.state });
   }
-  const chain = causalChains.get(entity.id);
-  if (chain) {
-    log(`causal chain hook=${entity.id} events=${chain.length}: ${chain.map((c) => c.event).join(' → ')}`, session?.playerId);
-    causalChains.delete(entity.id);
-  }
+  // P5.1: defer chain cleanup 2s để item_spawn (vanilla pickup) kịp append.
+  // Vanilla auto-pickup fire item_spawn SAU hook_remove (vài tick sau). Nếu
+  // xoá chain ngay, item_spawn causal event bị miss. Defer 2s = đủ cho
+  // vanilla pickup xảy ra, sau đó log final chain.
+  const hookIdForChain = entity.id;
+  system.runTimeout(() => {
+    const chain = causalChains.get(hookIdForChain);
+    if (chain) {
+      log(`causal chain hook=${hookIdForChain} events=${chain.length}: ${chain.map((c) => c.event).join(' → ')}`, session?.playerId);
+      causalChains.delete(hookIdForChain);
+    }
+  }, 40); // 40 ticks = 2s
   if (!session) {
     log(`hook remove ${entity.id} no session`, undefined);
     return;
@@ -2329,7 +2350,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-01-p4-hysteresis-global', undefined);
+  log('detector initialized v2026-09-01-p5-item-after-remove', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);
