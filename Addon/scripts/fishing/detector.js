@@ -430,15 +430,13 @@ export function throwItemToPlayer(item, player) {
   const horizontalDistance = Math.sqrt(dx * dx + dz * dz);
   if (horizontalDistance < 0.01) return;
 
-  // Fit từ 11 vanilla samples (ChatGPT regression):
-  //   v_H ≈ 0.094 * dH  (R²=0.79, RMSE=0.17)
-  //   v_y = (dy + 0.04 * T * (T-1) / 2) / T  với T=8 (≈ ballistic reach)
-  // Không cap 0.55 (vanilla có vy=0.78-0.93 ở dH=3-10). Drag 0.98 horizontal,
-  // gravity 0.04 vertical. applyImpulse set v=impulse trực tiếp (no drag clamp).
-  const T = 8;
-  const g = 0.04;
+  // Fit từ 14 vanilla samples (ChatGPT regression + 3 mới):
+  //   v_h ≈ 0.094 * dH (mean 0.08-0.09 across samples)
+  //   v_y ≈ 0.09 * dH (mean 0.09, range 0.08-0.10)
+  // Bỏ dy (ChatGPT gợi ý dy-driven ballistic underestimate vy khi dy>3).
+  // Tín hiệu: 3 sample mới có vy/dH = 0.097, 0.083, 0.097 → consistent.
   const v_h = horizontalDistance * 0.094;
-  const v_y = (dy + 0.5 * g * T * (T - 1)) / T;
+  const v_y = Math.max(0.18, horizontalDistance * 0.09);
   const dirX = dx / horizontalDistance;
   const dirZ = dz / horizontalDistance;
 
@@ -2430,7 +2428,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-01-p5-item-fit-arc-v5', undefined);
+  log('detector initialized v2026-09-01-p5-item-fit-arc-v6', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);
