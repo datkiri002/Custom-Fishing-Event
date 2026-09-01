@@ -410,6 +410,18 @@ function dot3D(a, b) {
  * @param {Player} player
  */
 export function throwItemToPlayer(item, player) {
+  // Debug: log before applyImpulse — so we can compare replacement arc vs
+  // vanilla fish arc (logged in onEntitySpawn for item).
+  let dbgVelBefore = /** @type {Vector3} */ ({ x: 0, y: 0, z: 0 });
+  try { dbgVelBefore = /** @type {Vector3} */ (item.getVelocity() ?? { x: 0, y: 0, z: 0 }); } catch { /* ignore */ }
+  let dbgType = '?';
+  try { dbgType = String(item.typeId); } catch { /* ignore */ }
+  let dbgItemName = '?';
+  try {
+    const c = /** @type {any} */ (item).getComponent?.('minecraft:item');
+    if (c) dbgItemName = String(c.itemStack?.typeId ?? '?');
+  } catch { /* ignore */ }
+
   const from = item.location;
   const to = /** @type {Player} */ (player).location;
   const dx = to.x - from.x;
@@ -418,11 +430,15 @@ export function throwItemToPlayer(item, player) {
   const horizontalDistance = Math.sqrt(dx * dx + dz * dz);
   if (horizontalDistance < 0.01) return;
 
-  // Fitted from 7 in-game trajectory samples (dPlayer 0.75→7.62):
-  //   speed/d ≈ 0.15 (mean 0.15, std 0.03), vy/d ≈ 0.13 (mean 0.13, std 0.05)
-  // → v_h = 0.13 * d, v_y = 0.13 * d, floor 0.18
-  const v_h = horizontalDistance * 0.13;
-  const v_y = Math.max(0.18, horizontalDistance * 0.13);
+  // Ballistic fit: target flight time T=8 ticks. With drag 0.98, gravity 0.04:
+  //   effective horizontal speed = d / (T * 0.95)  (95% from drag avg)
+  //   vertical: vy such that peak apex ~ 1.5 blocks above player
+  //     vy = (dy + 0.5 * g * T²) / T + boost
+  // Empirical: 10 samples (d=0.75..7.62) show mean speed/d=0.14, vy/d=0.13.
+  const T = 8;
+  const g = 0.04;
+  const v_h = horizontalDistance / T;
+  const v_y = (dy + 0.5 * g * T * T) / T + 0.15;
   const dirX = dx / horizontalDistance;
   const dirZ = dz / horizontalDistance;
 
@@ -434,6 +450,17 @@ export function throwItemToPlayer(item, player) {
       z: dirZ * v_h,
     });
   } catch { /* ignore */ }
+  // Debug: log after applyImpulse — confirm impulse applied + log predicted flight
+  log(
+    `replacement-trajectory ${dbgItemName} type=${dbgType} ` +
+    `from=(${from.x.toFixed(2)},${from.y.toFixed(2)},${from.z.toFixed(2)}) ` +
+    `to=(${to.x.toFixed(2)},${to.y.toFixed(2)},${to.z.toFixed(2)}) ` +
+    `dH=${horizontalDistance.toFixed(2)} dy=${dy.toFixed(2)} ` +
+    `velBefore=(${dbgVelBefore.x.toFixed(3)},${dbgVelBefore.y.toFixed(3)},${dbgVelBefore.z.toFixed(3)}) ` +
+    `impulse=(${(dirX * v_h).toFixed(3)},${v_y.toFixed(3)},${(dirZ * v_h).toFixed(3)}) ` +
+    `speed=${Math.sqrt((dirX * v_h) ** 2 + v_y ** 2 + (dirZ * v_h) ** 2).toFixed(3)}`,
+    /** @type {Player} */ (player).id
+  );
 }
 
 /** @param {string} playerId */
@@ -2403,7 +2430,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-01-p5-item-fit-arc-v2', undefined);
+  log('detector initialized v2026-09-01-p5-item-fit-arc-v3', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);
