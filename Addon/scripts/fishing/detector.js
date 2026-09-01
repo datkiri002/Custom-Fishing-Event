@@ -528,8 +528,8 @@ export function throwItemToPlayer(item, player) {
     `to=(${to.x.toFixed(2)},${to.y.toFixed(2)},${to.z.toFixed(2)}) ` +
     `dH=${horizontalDistance.toFixed(2)} dy=${dy.toFixed(2)} ` +
     `velBefore=(${dbgVelBefore.x.toFixed(3)},${dbgVelBefore.y.toFixed(3)},${dbgVelBefore.z.toFixed(3)}) ` +
-    `impulse=(${(dirX * v_h).toFixed(3)},${v_y.toFixed(3)},${(dirZ * v_h).toFixed(3)}) ` +
-    `speed=${Math.sqrt((dirX * v_h) ** 2 + v_y ** 2 + (dirZ * v_h) ** 2).toFixed(3)}`,
+    `impulse=(${v_x.toFixed(3)},${v_y.toFixed(3)},${v_z.toFixed(3)}) ` +
+    `speed=${Math.sqrt(v_x * v_x + v_y * v_y + v_z * v_z).toFixed(3)}`,
     /** @type {Player} */ (player).id
   );
 }
