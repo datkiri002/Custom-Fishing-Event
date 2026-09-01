@@ -2040,6 +2040,58 @@ function onEntitySpawn(event) {
   try { entity.setDynamicProperty('fishing_caught', true); } catch { /* ignore */ }
   log(`item spawn ${itemTypeId} id=${entity.id}`, undefined);
 
+  // Debug: log full trajectory snapshot để user inspect parabola parameters
+  // (velocity, direction-to-player, predicted next-tick position). Dùng để
+  // tune `applyVelocityToReplacementItem` cho spawn replacement bay về player
+  // giống vanilla fish arc.
+  const itemVel = /** @type {Vector3} */ (itemCandidate.velocity);
+  const itemSpeed = vecMagnitude(itemVel);
+  const velDir = itemSpeed > 0.01 ? { x: itemVel.x / itemSpeed, y: itemVel.y / itemSpeed, z: itemVel.z / itemSpeed } : { x: 0, y: 0, z: 0 };
+  // Predicted next-tick: vel + gravity (vanilla ~ -0.04 per tick on y, drag 0.98 on xz)
+  const predictedNext = {
+    x: itemCandidate.location.x + itemVel.x * 0.98,
+    y: itemCandidate.location.y + (itemVel.y - 0.04),
+    z: itemCandidate.location.z + itemVel.z * 0.98,
+  };
+  // Per-active-session context (active hook) + per-removed-hook context (post-remove pickup)
+  /** @type {Array<{hookId: string, playerId: string|undefined, distHook: number}>} */
+  const contexts = [];
+  for (const session of sessionsByHook.values()) {
+    if (session.dimensionId !== entity.dimension.id) continue;
+    const d = distance3D(session.hookLocation, entity.location);
+    if (d <= MAX_HOOK_TO_ITEM_DISTANCE * 1.5) contexts.push({ hookId: session.hookId, playerId: session.playerId, distHook: d });
+  }
+  for (const removedHook of pending.values()) {
+    if (removedHook.dimensionId !== entity.dimension.id) continue;
+    const d = distance3D(removedHook.location, entity.location);
+    if (d <= MAX_HOOK_TO_ITEM_DISTANCE * 1.5) contexts.push({ hookId: removedHook.hookId, playerId: removedHook.playerId, distHook: d });
+  }
+  for (const ctx of contexts) {
+    let playerInfo = '';
+    if (ctx.playerId) {
+      const player = world.getEntity(ctx.playerId);
+      if (player && player.typeId === 'minecraft:player') {
+        const pLoc = /** @type {Player} */ (player).location;
+        const dx = pLoc.x - itemCandidate.location.x;
+        const dy = (pLoc.y + 1.6) - itemCandidate.location.y;
+        const dz = pLoc.z - itemCandidate.location.z;
+        const dPlayer = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        const dDir = dPlayer > 0.01 ? { x: dx / dPlayer, y: dy / dPlayer, z: dz / dPlayer } : { x: 0, y: 0, z: 0 };
+        playerInfo = `playerLoc=(${pLoc.x.toFixed(2)},${pLoc.y.toFixed(2)},${pLoc.z.toFixed(2)}) ` +
+          `dPlayer=${dPlayer.toFixed(2)} dirToPlayer=(${dDir.x.toFixed(2)},${dDir.y.toFixed(2)},${dDir.z.toFixed(2)}) `;
+      }
+    }
+    log(
+      `item-trajectory ${itemTypeId} id=${entity.id} hook=${ctx.hookId} distHook=${ctx.distHook.toFixed(2)} ` +
+      `vel=(${itemVel.x.toFixed(3)},${itemVel.y.toFixed(3)},${itemVel.z.toFixed(3)}) ` +
+      `speed=${itemSpeed.toFixed(3)} velDir=(${velDir.x.toFixed(2)},${velDir.y.toFixed(2)},${velDir.z.toFixed(2)}) ` +
+      `loc=(${itemCandidate.location.x.toFixed(2)},${itemCandidate.location.y.toFixed(2)},${itemCandidate.location.z.toFixed(2)}) ` +
+      `predictedNext=(${predictedNext.x.toFixed(2)},${predictedNext.y.toFixed(2)},${predictedNext.z.toFixed(2)}) ` +
+      playerInfo,
+      ctx.playerId
+    );
+  }
+
   // P2.3 + P5.1: item_spawn causal event. Gắn vào chain của TỪNG active
   // session HOẶC removed hook (vanilla pickup spawns item SAU hook_remove)
   // có distance gần item.
@@ -2350,7 +2402,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-01-p5-item-after-remove', undefined);
+  log('detector initialized v2026-09-01-p5-item-debug-traj', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);
