@@ -1,0 +1,2083 @@
+============================================================
+CUSTOM FISHING EVENT V2
+HIGH-PRECISION FISHING DATA ASSOCIATION WORKFLOW
+============================================================
+
+MỤC TIÊU
+------------------------------------------------------------
+1. Xác định chính xác Player nào sở hữu Fishing Hook.
+2. Xác định chính xác Item nào được sinh ra bởi lần câu đó.
+3. Không ép hệ thống phải match nếu bằng chứng không đủ mạnh.
+4. Ưu tiên:
+      ACCEPT  = xác định đủ chắc chắn
+      DEFER   = chưa đủ bằng chứng, tiếp tục quan sát
+      REJECT  = bằng chứng mâu thuẫn / không phù hợp
+5. Dùng đồng thời:
+      - Event chronology
+      - Timestamp
+      - Tick
+      - Location
+      - ViewDirection
+      - Hook velocity
+      - Item velocity
+      - Trajectory
+      - Session state
+      - Player movement
+      - Hook lifetime
+      - Item spawn timing
+      - Global correlation
+      - Confidence margin
+6. Không chỉ tìm candidate "gần nhất".
+7. Không được phép "đoán" owner/item khi có ambiguity.
+
+
+============================================================
+KHÁI NIỆM THỜI GIAN
+============================================================
+
+Mỗi event phải lưu cả:
+
+    timestamp      = performance.now() / thời gian thực tương đối
+    tick           = system/current tick
+
+Không chỉ dùng timestamp.
+
+Mỗi session phải có:
+
+    beforeUseTime
+    beforeUseTick
+
+    afterUseTime
+    afterUseTick
+
+    hookSpawnTime
+    hookSpawnTick
+
+    reelBeforeTime
+    reelBeforeTick
+
+    reelAfterTime
+    reelAfterTick
+
+    itemSpawnTime
+    itemSpawnTick
+
+    hookRemoveTime
+    hookRemoveTick
+
+------------------------------------------------------------
+
+Các quan hệ thời gian mong muốn:
+
+CAST:
+
+    b_ItemUse(Fishing Rod)
+        <
+    a_ItemUse(Fishing Rod)
+        <
+    a_EntitySpawn(Fishing Hook)
+
+REEL:
+
+    b_ItemUse(Fishing Rod)
+        <
+    a_ItemUse(Fishing Rod)
+        <
+    a_EntitySpawn(Item)
+
+Trong trường hợp thành công:
+
+    b_Reel
+        <
+    a_Reel
+        <=
+    a_EntitySpawn(Item)
+        <=
+    b_EntityRemove(Hook)
+        <=
+    a_EntityRemove(Hook)
+
+Lưu ý:
+
+Không bắt buộc mọi event phải xảy ra đúng một thứ tự tuyệt đối
+trong cùng một tick.
+
+Do Minecraft có thể dispatch nhiều event trong cùng tick,
+cần dùng:
+
+    tick + timestamp + state
+
+thay vì timestamp đơn độc.
+
+
+============================================================
+PHASE 0 — CAPTURE PLAYER INPUT
+============================================================
+
+EVENT:
+
+    b_ItemUse
+    |
+    |-- kiểm tra item == minecraft:fishing_rod
+    |
+    +-- Capture PlayerState
+
+
+PlayerStateSnapshot:
+
+    playerId
+    dimensionId
+
+    location
+    viewDirection
+
+    rotation
+    velocity
+
+    timestamp
+    tick
+
+------------------------------------------------------------
+
+Tạo CastCandidate:
+
+    CastCandidate
+    {
+        playerId
+        dimensionId
+
+        origin
+        viewDirection
+        playerVelocity
+
+        beforeUseTime
+        beforeUseTick
+
+        state = WAITING_FOR_HOOK
+    }
+
+------------------------------------------------------------
+
+Từ:
+
+    origin
+    +
+    viewDirection
+
+tạo:
+
+    Ray A
+
+Ray A:
+
+    A(t) = origin + viewDirection * t
+
+Ray A không phải bằng chứng tuyệt đối.
+Nó chỉ là "dự đoán quỹ đạo hook".
+
+------------------------------------------------------------
+
+Đồng thời ghi:
+
+    CAST_CANDIDATE_CREATED
+
+
+============================================================
+PHASE 1 — AFTER ITEM USE
+============================================================
+
+EVENT:
+
+    a_ItemUse
+
+
+Kiểm tra:
+
+    source == Player
+    item == Fishing Rod
+
+
+Nếu player chưa có active fishing hook:
+
+    đây là CAST
+
+    cập nhật:
+
+        afterUseTime
+        afterUseTick
+
+    CastCandidate:
+
+        afterUseTime
+        afterUseTick
+
+        state = WAITING_FOR_HOOK
+
+------------------------------------------------------------
+
+Nếu player đang có active hook:
+
+    đây có khả năng là REEL
+
+    KHÔNG lập tức kết luận "thu cần".
+
+    Chỉ tạo:
+
+        ReelCandidate
+
+    lưu:
+
+        playerId
+
+        location
+        viewDirection
+        velocity
+
+        beforeReelTime
+        beforeReelTick
+
+        afterReelTime
+        afterReelTick
+
+        activeHookIds
+
+        state = REEL_REQUESTED
+
+
+============================================================
+PHASE 2 — HOOK SPAWN
+============================================================
+
+EVENT:
+
+    a_EntitySpawn
+
+
+Chỉ quan tâm:
+
+    entity.typeId == minecraft:fishing_hook
+
+
+Lấy:
+
+    hookId
+    hookLocation
+    hookVelocity
+    dimension
+
+
+------------------------------------------------------------
+
+Tạo Ray B:
+
+    B(t) = hookSpawnLocation + hookVelocity * t
+
+Ray B là hướng chuyển động ban đầu của Hook.
+
+------------------------------------------------------------
+
+Đồng thời dự đoán Hook từ Ray A:
+
+    predictedHookPosition =
+        CastOrigin + ViewDirection * distance
+
+
+Tính:
+
+    distance(A, HookSpawnLocation)
+
+    angle(A.direction, HookVelocity)
+
+    perpendicularDistance(HookSpawnLocation, Ray A)
+
+------------------------------------------------------------
+
+Tạo HookSpawnCandidate cho TẤT CẢ CastCandidate hợp lệ:
+
+    CastCandidate
+        ×
+    HookSpawn
+
+
+Không chọn ngay một player.
+
+------------------------------------------------------------
+
+HARD GATE:
+
+Candidate bị loại ngay nếu:
+
+    dimension khác
+
+    hoặc
+
+    thời gian vượt giới hạn
+
+    hoặc
+
+    tick vượt giới hạn
+
+    hoặc
+
+    hook quá xa vùng cast hợp lý
+
+------------------------------------------------------------
+
+Sau Hard Gate:
+
+Tính Owner Association Score:
+
+
+    SCORE_HOOK_OWNER =
+
+        CastTimeScore
+      + CastTickScore
+
+      + RayAlignmentScore
+      + RayDistanceScore
+
+      + HookVelocityScore
+
+      + PlayerDistanceScore
+
+      + PlayerVelocityConsistencyScore
+
+
+------------------------------------------------------------
+
+RAY MATCH
+
+Kiểm tra:
+
+    HookSpawnLocation gần Ray A
+
+và:
+
+    HookVelocity
+    cùng hướng tương đối với
+    Ray A
+
+
+Ví dụ:
+
+    angle(A.direction, HookVelocity)
+
+càng nhỏ
+→ càng tin cậy.
+
+
+------------------------------------------------------------
+
+PLAYER MOVEMENT CONSISTENCY
+
+So sánh:
+
+    playerVelocity
+    viewDirection
+    hookSpawnLocation
+
+Nếu Player đang di chuyển:
+
+    predictedPlayerLocation =
+        playerLocation
+        + playerVelocity * deltaTime
+
+Sau đó dùng predicted location
+thay vì location tĩnh.
+
+
+============================================================
+PHASE 3 — XÁC ĐỊNH OWNER
+============================================================
+
+Sau khi tạo toàn bộ Hook ↔ Player candidates:
+
+KHÔNG dùng:
+
+    nearest player
+
+KHÔNG dùng:
+
+    first player found
+
+
+Mà tạo:
+
+    OwnerCandidateGraph
+
+
+Ví dụ:
+
+    Player A → Hook H1 = 1760
+    Player B → Hook H1 = 1310
+    Player C → Hook H1 =  720
+
+
+------------------------------------------------------------
+
+Áp dụng:
+
+    ABSOLUTE THRESHOLD
+
+và:
+
+    CONFIDENCE MARGIN
+
+
+Ví dụ:
+
+    best = 1760
+    second = 1310
+
+    margin = 450
+
+    => ACCEPT
+
+
+Nhưng:
+
+    best = 1510
+    second = 1488
+
+    margin = 22
+
+    => AMBIGUOUS
+
+
+=> DEFER
+
+Không gán owner.
+
+
+------------------------------------------------------------
+
+Nếu:
+
+    best < minimum threshold
+
+=> REJECT
+
+
+------------------------------------------------------------
+
+Nếu:
+
+    best đủ cao
+    nhưng margin quá thấp
+
+=> DEFER
+
+
+------------------------------------------------------------
+
+Khi ACCEPT:
+
+    FishingSession được tạo:
+
+
+    FishingSession
+    {
+        sessionId
+
+        playerId
+        hookId
+
+        dimensionId
+
+        castOrigin
+        castDirection
+
+        playerVelocityAtCast
+
+        hookSpawnLocation
+        hookVelocity
+
+        beforeUseTime
+        beforeUseTick
+
+        afterUseTime
+        afterUseTick
+
+        hookSpawnTime
+        hookSpawnTick
+
+        state = FISHING
+    }
+
+
+============================================================
+PHASE 4 — ACTIVE FISHING SESSION
+============================================================
+
+Trong thời gian Hook còn tồn tại:
+
+    FishingSession.state = FISHING
+
+
+Liên tục cập nhật nếu API cho phép:
+
+    currentHookLocation
+    currentHookVelocity
+
+    currentPlayerLocation
+    currentPlayerVelocity
+
+
+Không cần polling quá dày.
+
+Chỉ cần snapshot tại các event quan trọng.
+
+
+------------------------------------------------------------
+
+Session giữ:
+
+    CAST TRAJECTORY
+    HOOK TRAJECTORY
+    PLAYER TRAJECTORY
+
+để sử dụng về sau.
+
+
+============================================================
+PHASE 5 — REEL REQUEST
+============================================================
+
+EVENT:
+
+    b_ItemUse(Fishing Rod)
+
+và:
+
+    player đang sở hữu active hook
+
+
+=> REEL CANDIDATE
+
+
+------------------------------------------------------------
+
+Capture:
+
+    reelBeforeLocation
+    reelBeforeDirection
+    reelBeforeVelocity
+
+    reelBeforeTime
+    reelBeforeTick
+
+
+------------------------------------------------------------
+
+EVENT:
+
+    a_ItemUse(Fishing Rod)
+
+
+=> cập nhật:
+
+    reelAfterTime
+    reelAfterTick
+
+
+------------------------------------------------------------
+
+Liên kết ReelCandidate với Hook:
+
+    Hook thuộc Player
+    AND
+    Hook đang ACTIVE
+
+
+Nếu Player có nhiều Hook:
+
+    tạo candidate cho từng Hook
+
+sau đó score:
+
+
+    ReelHookScore =
+
+        TemporalConsistency
+      + PlayerHookDistance
+      + HookStateConsistency
+      + SessionAgeConsistency
+
+
+Không được tự động lấy hook gần Player nhất.
+
+
+============================================================
+PHASE 6 — ITEM SPAWN
+============================================================
+
+EVENT:
+
+    a_EntitySpawn
+
+
+Chỉ quan tâm:
+
+    entity.typeId == minecraft:item
+
+
+Lấy:
+
+    itemEntityId
+
+    itemTypeId
+    itemStack
+
+    itemLocation
+    itemVelocity
+
+    timestamp
+    tick
+
+    dimension
+
+
+------------------------------------------------------------
+
+TẠO RAY C
+
+Từ:
+
+    itemSpawnLocation
+    itemVelocity
+
+
+tạo:
+
+    Ray C
+
+
+    C(t) =
+        itemSpawnLocation
+        + itemVelocity * t
+
+
+Ray C mô tả hướng Item đang bị kéo / bay.
+
+
+============================================================
+PHASE 7 — ITEM ↔ HOOK CORRELATION
+============================================================
+
+QUAN TRỌNG:
+
+Ở thời điểm Item spawn:
+
+    Hook vẫn có thể chưa bị remove.
+
+Do đó:
+
+    KHÔNG chờ HookRemove.
+
+
+Tại:
+
+    a_EntitySpawn(Item)
+
+
+lấy toàn bộ active FishingSession
+có khả năng liên quan.
+
+
+------------------------------------------------------------
+
+Candidate:
+
+    Session
+        ×
+    Item
+
+
+Tạo:
+
+    ItemCorrelationCandidate
+
+
+------------------------------------------------------------
+
+HARD GATE:
+
+Reject ngay nếu:
+
+    dimension khác
+
+hoặc:
+
+    item spawn quá xa Hook
+
+hoặc:
+
+    item spawn quá xa Player
+
+hoặc:
+
+    thời gian không hợp lệ
+
+hoặc:
+
+    tick delta không hợp lệ
+
+
+============================================================
+PHASE 8 — ITEM TRAJECTORY MATCH
+============================================================
+
+Đây là một trong các evidence mạnh nhất.
+
+
+Kiểm tra:
+
+    Item Ray C
+
+
+với:
+
+
+    Hook Location
+
+
+Nếu:
+
+    HookLocation nằm gần Ray C
+
+=> + score
+
+
+------------------------------------------------------------
+
+Tiếp tục kiểm tra:
+
+    Player Location
+
+nằm gần hướng di chuyển của Ray C
+
+
+=> + score
+
+
+------------------------------------------------------------
+
+Tính:
+
+    angle(ItemVelocity, directionToPlayer)
+
+Nếu Item đang bay về phía Player:
+
+    + strong score
+
+
+Nếu Item bay khỏi Player:
+
+    - strong negative score
+
+
+Không chỉ:
+
+    +0
+
+
+Mà phải có:
+
+    NEGATIVE EVIDENCE
+
+
+============================================================
+PHASE 9 — HOOK ↔ ITEM GEOMETRIC RELATIONSHIP
+============================================================
+
+Tại thời điểm:
+
+    a_EntitySpawn(Item)
+
+
+Hook vẫn active.
+
+
+Capture:
+
+    HookLocationNow
+
+
+------------------------------------------------------------
+
+Tính:
+
+
+    D1 =
+        distance(ItemSpawnLocation, HookLocationNow)
+
+
+    D2 =
+        distance(ItemSpawnLocation, PlayerLocation)
+
+
+------------------------------------------------------------
+
+Kiểm tra:
+
+    HookLocationNow gần Ray C
+
+
+và:
+
+    PlayerLocation gần Ray C
+
+
+và:
+
+    ItemVelocity hướng về Player
+
+
+=> đây là một chuỗi hình học nhất quán.
+
+
+------------------------------------------------------------
+
+Mục tiêu:
+
+
+    Hook
+      ↓
+    Item Spawn
+      ↓
+    Item Velocity
+      ↓
+    Player
+
+
+phải tạo thành một quan hệ hình học hợp lý.
+
+
+============================================================
+PHASE 10 — TEMPORAL CAUSALITY
+============================================================
+
+Không chỉ tính:
+
+    absolute time difference
+
+
+Mà kiểm tra cả causal order.
+
+
+Mẫu lý tưởng:
+
+
+    b_Reel
+       <
+    a_Reel
+       <
+    a_ItemSpawn
+
+
+Nếu:
+
+    ItemSpawn < b_Reel
+
+=> gần như chắc chắn KHÔNG phải reward của reel đó.
+
+
+------------------------------------------------------------
+
+Nếu:
+
+    ItemSpawn quá lâu sau Reel
+
+
+=> giảm mạnh confidence
+
+
+------------------------------------------------------------
+
+Nếu:
+
+    ItemSpawn ngay sau Reel
+
+
+=> strong evidence
+
+
+------------------------------------------------------------
+
+Dùng:
+
+    TimeLikelihood(deltaTime)
+
+thay vì linear score đơn giản.
+
+
+Ví dụ:
+
+    0–50ms       = cực mạnh
+    50–150ms     = rất mạnh
+    150–300ms    = mạnh
+    300–500ms    = trung bình
+    500–750ms    = yếu
+    750–1000ms   = rất yếu
+    >1000ms      = reject
+
+
+Các giá trị thực tế phải benchmark từ server.
+
+
+============================================================
+PHASE 11 — SESSION CAUSAL FINGERPRINT
+============================================================
+
+Mỗi FishingSession phải có:
+
+    Cast fingerprint
+    Hook fingerprint
+    Reel fingerprint
+
+
+Ví dụ:
+
+
+    CAST
+    {
+        location
+        direction
+        velocity
+        time
+        tick
+    }
+
+
+    HOOK
+    {
+        location
+        velocity
+        time
+        tick
+    }
+
+
+    REEL
+    {
+        location
+        direction
+        velocity
+        time
+        tick
+    }
+
+
+------------------------------------------------------------
+
+Item candidate phải phù hợp với:
+
+    CAST
+      ↓
+    HOOK
+      ↓
+    REEL
+      ↓
+    ITEM
+
+
+Không chỉ:
+
+    HOOK → ITEM
+
+
+============================================================
+PHASE 12 — FULL CORRELATION SCORE
+============================================================
+
+Tạo:
+
+
+    CorrelationEvidence
+
+
+    {
+        temporal
+        tick
+
+        hookItemDistance
+        playerItemDistance
+
+        rayAAlignment
+        rayBAlignment
+        rayCAlignment
+
+        hookRayC
+        playerRayC
+
+        itemVelocity
+        playerDirection
+
+        ownerConfidence
+
+        reelConfidence
+
+        sessionContinuity
+
+        physicsPlausibility
+
+        negativeEvidence
+
+        alternativeScore
+        confidenceMargin
+    }
+
+
+------------------------------------------------------------
+
+Tổng hợp:
+
+
+    correlationScore =
+
+
+          temporalScore
+        + tickScore
+
+        + spatialScore
+
+        + trajectoryScore
+
+        + ownerScore
+
+        + reelScore
+
+        + causalityScore
+
+        + physicsScore
+
+        + continuityScore
+
+        + positiveEvidence
+
+        - negativeEvidence
+
+
+Không để một feature đơn lẻ quyết định.
+
+
+============================================================
+PHASE 13 — COMPETING CANDIDATES
+============================================================
+
+Ví dụ:
+
+
+    Hook A → Item X = 1720
+    Hook B → Item X = 1678
+
+
+Không ACCEPT ngay.
+
+
+Tính:
+
+
+    margin = 1720 - 1678 = 42
+
+
+Nếu:
+
+    margin < requiredMargin
+
+
+=> AMBIGUOUS
+
+
+=> DEFER
+
+
+------------------------------------------------------------
+
+Ví dụ tốt:
+
+
+    Hook A → Item X = 1780
+    Hook B → Item X = 1120
+
+
+margin = 660
+
+
+=> ACCEPT A → X
+
+
+============================================================
+PHASE 14 — NULL ASSIGNMENT
+============================================================
+
+Hệ thống luôn phải cho phép:
+
+
+    Hook → NULL
+
+
+Ví dụ:
+
+
+    Hook A → Item X = 1280
+    Hook A → Item Y = 1240
+    Hook A → NULL   = 1400
+
+
+=> Hook A → NULL
+
+
+Không cố gán X/Y.
+
+
+------------------------------------------------------------
+
+Nguyên tắc:
+
+    Không chắc chắn
+        >
+    Không đoán
+
+
+============================================================
+PHASE 15 — DEFER
+============================================================
+
+Nếu:
+
+    bestScore đủ cao
+
+nhưng:
+
+    confidence margin thấp
+
+
+=> DEFER
+
+
+------------------------------------------------------------
+
+Giữ:
+
+    PendingCatch
+
+
+Chờ thêm event / tick.
+
+
+Có thể dùng:
+
+
+    +1 tick
+    +2 tick
+    +3 tick
+
+
+để tiếp tục thu thập:
+
+    item movement
+    player movement
+    hook movement
+    pickup
+    inventory change
+    hook remove
+
+
+Sau đó tính lại correlation.
+
+
+============================================================
+PHASE 16 — HOOK REMOVE
+============================================================
+
+EVENT:
+
+    b_EntityRemove
+
+
+kiểm tra:
+
+    entity == Fishing Hook
+
+
+Nếu Hook đang thuộc FishingSession:
+
+    capture:
+
+        hookRemoveLocation
+        hookRemoveTime
+        hookRemoveTick
+
+
+Session:
+
+
+    FISHING
+       ↓
+    HOOK_REMOVING
+       ↓
+    PENDING_RESULT
+
+
+------------------------------------------------------------
+
+QUAN TRỌNG:
+
+HookRemove KHÔNG nhất thiết là lúc
+phát hiện catch.
+
+
+Nó là:
+
+    evidence bổ sung
+
+và:
+
+    session finalization signal.
+
+
+============================================================
+PHASE 17 — a_EntityRemove(HOOK)
+============================================================
+
+Sau:
+
+    a_EntityRemove
+
+
+đánh dấu:
+
+
+    hookAlive = false
+
+
+Nếu trước đó:
+
+    ItemCandidate đã match với Session
+
+
+=> tăng confidence
+
+
+Nếu:
+
+    Reel
+    +
+    ItemSpawn
+    +
+    HookRemove
+
+
+có causal order hợp lý
+
+
+=> VERY_HIGH_CONFIDENCE
+
+
+------------------------------------------------------------
+
+Nếu HookRemove xảy ra
+nhưng:
+
+    không có Item candidate
+
+
+=> có thể là:
+
+
+    REEL_EMPTY
+
+
+hoặc:
+
+
+    CANCELLED
+
+
+hoặc:
+
+
+    MISSED_CORRELATION
+
+
+Không được tự động coi là catch.
+
+
+============================================================
+PHASE 18 — INVENTORY / PICKUP VERIFICATION
+============================================================
+
+Sau ItemSpawn:
+
+nếu có thể quan sát được:
+
+    Player inventory change
+
+
+thì ghi:
+
+
+    inventoryChanged = true
+
+
+------------------------------------------------------------
+
+Nếu item được player pickup:
+
+    ItemPickupVerification = TRUE
+
+
+Điều này có thể tăng confidence đáng kể.
+
+
+------------------------------------------------------------
+
+Nhưng:
+
+    inventory change
+
+
+KHÔNG phải bằng chứng chính.
+
+
+Nó chỉ là:
+
+    SECONDARY EVIDENCE
+
+
+============================================================
+PHASE 19 — GLOBAL MATCHING
+============================================================
+
+Không xử lý độc lập:
+
+
+    Hook A → Item
+    Hook B → Item
+
+
+theo thứ tự event.
+
+
+------------------------------------------------------------
+
+Tạo global graph:
+
+
+                 Item X
+                /      \
+             1700      1650
+              /          \
+          Hook A         Hook B
+
+
+                 Item Y
+                /      \
+             1500      1100
+              /          \
+          Hook A         Hook B
+
+
+------------------------------------------------------------
+
+Tìm assignment tốt nhất toàn cục.
+
+
+Ví dụ:
+
+
+    Hook A → Item Y
+    Hook B → Item X
+
+
+có tổng confidence cao hơn:
+
+
+    Hook A → Item X
+    Hook B → Item Y
+
+
+thì chọn assignment thứ nhất.
+
+
+------------------------------------------------------------
+
+Global matching phải hỗ trợ:
+
+
+    NULL assignment
+
+
+để không ép ghép.
+
+
+============================================================
+PHASE 20 — ACCEPT / DEFER / REJECT
+============================================================
+
+ACCEPT:
+
+
+    score >= absoluteThreshold
+    AND
+    margin >= minimumMargin
+    AND
+    hard constraints pass
+    AND
+    causal chain valid
+
+
+------------------------------------------------------------
+
+DEFER:
+
+
+    score khá cao
+    BUT
+    ambiguity còn cao
+
+hoặc:
+
+    cần thêm event
+
+
+------------------------------------------------------------
+
+REJECT:
+
+
+    hard gate fail
+
+hoặc:
+
+    score quá thấp
+
+hoặc:
+
+    causal contradiction
+
+hoặc:
+
+    negative evidence quá mạnh
+
+
+============================================================
+PHASE 21 — FINAL CATCH
+============================================================
+
+Chỉ khi:
+
+
+    Session
+      +
+    Reel
+      +
+    Item
+      +
+    Correlation
+      +
+    Confidence
+
+
+đạt điều kiện:
+
+
+    ACCEPT
+
+
+thì:
+
+    beforeEvents.catch
+
+
+được phát.
+
+
+Event chứa:
+
+
+    player
+    sessionId
+    hook
+    item
+    itemStack
+
+    catchLocation
+
+    correlationScore
+    confidence
+
+    evidence
+
+
+------------------------------------------------------------
+
+Consumer có thể:
+
+
+    event.cancel = true
+
+
+hoặc:
+
+
+    event.item = replacementItem
+
+
+------------------------------------------------------------
+
+Nếu cancel:
+
+
+    CANCELLED
+
+
+Nếu không:
+
+
+    AFTER_CATCH
+
+
+============================================================
+PHASE 22 — AFTER CATCH
+============================================================
+
+Sau khi catch được ACCEPT:
+
+
+    afterEvents.catch
+
+
+phát.
+
+
+Session chuyển:
+
+
+    PENDING_RESULT
+        ↓
+    CATCH_CONFIRMED
+        ↓
+    CLOSED
+
+
+------------------------------------------------------------
+
+Cleanup:
+
+
+    remove session
+
+    release hook ownership
+
+    mark item claimed
+
+    remove pending candidates
+
+
+============================================================
+PHASE 23 — EMPTY REEL
+============================================================
+
+Nếu:
+
+
+    Reel xảy ra
+    +
+    Hook removed
+    +
+    hết correlation window
+    +
+    không có Item đạt threshold
+
+
+=>
+
+
+    afterEvents.reel / cancel
+
+
+tùy API design.
+
+
+KHÔNG phát catch.
+
+
+============================================================
+PHASE 24 — ITEM DOUBLE CLAIM PROTECTION
+============================================================
+
+Một Item chỉ được claim bởi:
+
+    1 FishingSession
+
+
+Một session cũng không được claim:
+
+    cùng một Item nhiều lần.
+
+
+Lưu:
+
+
+    claimedItemIds
+
+
+và:
+
+
+    claimedSessionIds
+
+
+------------------------------------------------------------
+
+Nếu:
+
+
+    Item X
+
+
+đã được ACCEPT cho:
+
+
+    Hook A
+
+
+thì:
+
+
+    Hook B
+
+
+không được sử dụng Item X.
+
+
+============================================================
+PHASE 25 — MULTI-ITEM CATCH
+============================================================
+
+Một FishingSession có thể có:
+
+
+    Item A
+    Item B
+    Item C
+
+
+nếu chúng:
+
+
+    cùng causal chain
+
+và:
+
+
+    cùng correlation window
+
+và:
+
+
+    cùng Reel
+
+
+------------------------------------------------------------
+
+Mỗi item phải tự vượt qua:
+
+
+    Item ↔ Hook correlation
+
+
+Không vì Item A đúng
+mà tự động cho Item B đúng.
+
+
+------------------------------------------------------------
+
+Giới hạn:
+
+
+    MAX_ITEMS_PER_CATCH
+
+
+Sau khi đạt giới hạn:
+
+
+    finalize.
+
+
+============================================================
+PHASE 26 — FALSE POSITIVE DEFENSE
+============================================================
+
+Mọi Item spawn trong world
+KHÔNG mặc định là fishing reward.
+
+
+------------------------------------------------------------
+
+Item sẽ bị REJECT nếu:
+
+
+    sai dimension
+
+hoặc:
+
+    sai temporal window
+
+hoặc:
+
+    sai session
+
+hoặc:
+
+    sai trajectory
+
+hoặc:
+
+    sai physics
+
+hoặc:
+
+    không có Hook association
+
+hoặc:
+
+    owner ambiguity
+
+hoặc:
+
+    competing candidate quá sát
+
+hoặc:
+
+    confidence dưới threshold
+
+
+============================================================
+PHASE 27 — FALSE NEGATIVE DEFENSE
+============================================================
+
+Không reject quá sớm.
+
+
+Nếu:
+
+
+    score trung bình
+    +
+    evidence đang tiếp tục tăng
+
+
+=> DEFER
+
+
+------------------------------------------------------------
+
+Sau:
+
+
+    +1 tick
+    +2 tick
+    +3 tick
+
+
+recalculate.
+
+
+------------------------------------------------------------
+
+Chỉ final reject khi:
+
+
+    correlation window kết thúc.
+
+
+============================================================
+PHASE 28 — DEBUG / EVIDENCE LOG
+============================================================
+
+Mỗi correlation phải có log:
+
+
+    Session:
+    Hook:
+    Player:
+    Item:
+
+
+    Timeline:
+
+    b_ItemUse       = ...
+    a_ItemUse       = ...
+    HookSpawn       = ...
+    b_Reel          = ...
+    a_Reel          = ...
+    ItemSpawn       = ...
+    b_HookRemove    = ...
+    a_HookRemove    = ...
+
+
+    Geometry:
+
+    RayA distance       = ...
+    RayB alignment      = ...
+    RayC alignment      = ...
+
+    Hook → Item         = ...
+    Player → Item       = ...
+
+    Item → Player angle = ...
+
+
+    Scores:
+
+    Temporal           = ...
+    Tick               = ...
+    Spatial            = ...
+    Trajectory         = ...
+    Owner              = ...
+    Reel               = ...
+    Causality          = ...
+    Physics            = ...
+    NegativeEvidence   = ...
+
+    TOTAL              = ...
+
+
+    Alternative:
+
+    secondBest         = ...
+    confidenceMargin   = ...
+
+
+    DECISION:
+
+    ACCEPT
+    DEFER
+    REJECT
+
+
+============================================================
+FINAL DECISION PIPELINE
+============================================================
+
+Player
+ |
+ +--> b_ItemUse(Fishing Rod)
+ |       |
+ |       +--> Capture Location
+ |       +--> Capture ViewDirection
+ |       +--> Capture Velocity
+ |       +--> Timestamp
+ |       +--> Tick
+ |       |
+ |       +--> Ray A
+ |       |
+ |       +--> CastCandidate
+ |
+ +--> a_ItemUse(Fishing Rod)
+ |       |
+ |       +--> update CastCandidate
+ |       |
+ |       +--> hoặc tạo ReelCandidate
+ |
+ +--> a_EntitySpawn(Fishing Hook)
+ |       |
+ |       +--> Hook Location
+ |       +--> Hook Velocity
+ |       +--> Ray B
+ |       |
+ |       +--> A ↔ B comparison
+ |       +--> Time comparison
+ |       +--> Tick comparison
+ |       |
+ |       +--> Owner Candidate Graph
+ |       |
+ |       +--> Confidence + Margin
+ |       |
+ |       +--> ACCEPT OWNER
+ |       |
+ |       +--> FishingSession
+ |
+ +--> REEL
+ |       |
+ |       +--> b_ItemUse
+ |       +--> a_ItemUse
+ |       |
+ |       +--> ReelCandidate
+ |       +--> Associate with Active Hook
+ |
+ +--> a_EntitySpawn(Fishing Item)
+ |       |
+ |       +--> Item Location
+ |       +--> Item Velocity
+ |       +--> Ray C
+ |       |
+ |       +--> Find Active FishingSessions
+ |       |
+ |       +--> Hard Gate
+ |       |
+ |       +--> Hook ↔ Ray C
+ |       +--> Player ↔ Ray C
+ |       +--> ItemVelocity ↔ Player
+ |       +--> Time
+ |       +--> Tick
+ |       +--> Reel
+ |       +--> Causality
+ |       +--> Physics
+ |       |
+ |       +--> Candidate Graph
+ |       |
+ |       +--> Global Matching
+ |       |
+ |       +--> Confidence Margin
+ |       |
+ |       +--> ACCEPT / DEFER / REJECT
+ |
+ +--> b_EntityRemove(Hook)
+ |       |
+ |       +--> Capture remove state
+ |       +--> Pending Result
+ |
+ +--> a_EntityRemove(Hook)
+ |       |
+ |       +--> Hook no longer alive
+ |       +--> Final correlation evidence
+ |
+ +--> Inventory / Pickup
+ |       |
+ |       +--> Secondary verification
+ |
+ +--> Finalize
+         |
+         +--> ACCEPT
+         |      |
+         |      +--> beforeEvents.catch
+         |      |
+         |      +--> optional cancel / replace
+         |      |
+         |      +--> afterEvents.catch
+         |
+         +--> DEFER
+         |      |
+         |      +--> wait
+         |      +--> recalculate
+         |
+         +--> REJECT
+                |
+                +--> no catch
+
+
+============================================================
+NGUYÊN TẮC CỐT LÕI
+============================================================
+
+1. Không dùng khoảng cách đơn độc.
+
+2. Không dùng timestamp đơn độc.
+
+3. Không dùng Hook spawn đơn độc.
+
+4. Không dùng Item spawn đơn độc.
+
+5. Không dùng nearest-player đơn độc.
+
+6. Không ép assignment.
+
+7. Một item chỉ được claim một lần.
+
+8. Một session có fingerprint riêng.
+
+9. Candidate phải vượt Hard Gate trước khi score.
+
+10. Best candidate phải thắng cả:
+        Absolute Threshold
+        AND
+        Confidence Margin
+
+11. Khi chưa đủ chắc:
+        DEFER
+
+12. Khi bằng chứng mâu thuẫn:
+        REJECT
+
+13. HookRemove là evidence bổ sung,
+    không phải điều kiện duy nhất để tìm catch.
+
+14. ItemSpawn khi Hook còn sống là cơ hội tốt nhất
+    để correlation Hook ↔ Item.
+
+15. Ưu tiên causal chain:
+
+        CAST
+          ↓
+        HOOK
+          ↓
+        REEL
+          ↓
+        ITEM
+          ↓
+        HOOK REMOVE
+
+16. Global matching phải tối ưu toàn cục
+    và phải hỗ trợ NULL assignment.
+
+17. Positive evidence và Negative evidence
+    đều phải được tính.
+
+18. Mục tiêu cuối cùng không phải:
+        "luôn tìm được match"
+
+    mà là:
+        "chỉ match khi có đủ bằng chứng."
+
+
+============================================================
+MÔ HÌNH CUỐI CÙNG
+============================================================
+
+        EVENT STREAM
+             |
+             v
+       SESSION BUILD
+             |
+             v
+       HARD GATING
+             |
+             v
+     GEOMETRIC CORRELATION
+             |
+             v
+      TEMPORAL CORRELATION
+             |
+             v
+       CAUSAL CORRELATION
+             |
+             v
+       PHYSICS CORRELATION
+             |
+             v
+       GLOBAL ASSOCIATION
+             |
+             v
+   +---------+---------+
+   |         |         |
+   v         v         v
+ACCEPT     DEFER     REJECT
+   |         |         
+   |         +----> MORE OBSERVATION
+   |
+   v
+ BEFORE_CATCH
+   |
+   +--> CANCEL
+   |
+   +--> REPLACE
+   |
+   v
+ AFTER_CATCH
+   |
+   v
+ SESSION CLOSED

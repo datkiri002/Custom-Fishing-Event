@@ -1,0 +1,69 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "Addon",
+    "description": "§cYoutube§i Datkiri001",
+    "uuid": "b7e4c291-63af-4d82-9e15-7c3a5f8d2046",
+    "min_engine_version": [
+      1,
+      21,
+      50
+    ],
+    "version": [
+      1,
+      0,
+      0
+    ]
+  },
+  "capabilities": [
+    "script_eval"
+  ],
+  "modules": [
+    {
+      "type": "data",
+      "uuid": "e2a91f47-5c38-4b6d-a170-9d2f84c6e513",
+      "version": [
+        1,
+        3,
+        0
+      ]
+    },
+    {
+      "type": "script",
+      "language": "javascript",
+      "uuid": "4f8c2a73-d951-46be-b307-1e5d9a82c6f4",
+      "entry": "scripts/import.js",
+      "version": [
+        1,
+        0,
+        0
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "module_name": "@minecraft/server",
+      "version": "beta"
+    },
+    {
+      "module_name": "@minecraft/server-ui",
+      "version": "beta"
+    },
+    {
+      "module_name": "@minecraft/server-admin",
+      "version": "beta"
+    },
+    {
+      "module_name": "@minecraft/server-gametest",
+      "version": "beta"
+    },
+    {
+      "uuid": "8d31f6a4-2e79-4c50-b8a3-61f9d275e04c",
+      "version": [
+        1,
+        0,
+        0
+      ]
+    }
+  ]
+}
