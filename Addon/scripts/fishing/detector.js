@@ -430,15 +430,16 @@ export function throwItemToPlayer(item, player) {
   const horizontalDistance = Math.sqrt(dx * dx + dz * dz);
   if (horizontalDistance < 0.01) return;
 
-  // Ballistic fit: target flight time T=8 ticks. With drag 0.98, gravity 0.04:
-  //   effective horizontal speed = d / (T * 0.95)  (95% from drag avg)
-  //   vertical: vy such that peak apex ~ 1.5 blocks above player
-  //     vy = (dy + 0.5 * g * T²) / T + boost
-  // Empirical: 10 samples (d=0.75..7.62) show mean speed/d=0.14, vy/d=0.13.
+  // Ballistic fit: target flight time T=8 ticks. Cap vy 0.5 (peak ~3 blocks
+  // above start) to avoid shooting item into the sky when dy is large
+  // (player far above). Sample 3 had dy=6.46 → vy=1.12, item bay ~15 blocks
+  // up — way too high. Capping at 0.5 gives gentle arc.
+  // Empirical: 13 samples show mean vy_real ≈ 0.30-0.50, peak at d=7 ≈ 0.95.
   const T = 8;
   const g = 0.04;
   const v_h = horizontalDistance / T;
-  const v_y = (dy + 0.5 * g * T * T) / T + 0.15;
+  let v_y = (dy + 0.5 * g * T * T) / T + 0.15;
+  v_y = Math.max(0.18, Math.min(0.55, v_y));
   const dirX = dx / horizontalDistance;
   const dirZ = dz / horizontalDistance;
 
@@ -2430,7 +2431,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-01-p5-item-fit-arc-v3', undefined);
+  log('detector initialized v2026-09-01-p5-item-fit-arc-v4', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);
