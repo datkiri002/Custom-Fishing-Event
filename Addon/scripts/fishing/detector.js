@@ -169,6 +169,12 @@ const telemetry = {
   trajectorySamplesDropped: 0,  // hook bị remove trước khi capture đủ
   // P1.4: hook speed calibration (EMA)
   hookSpeedSamples: 0,
+  // P2.1: item active correlation
+  itemActiveCandidates: 0,    // tổng item candidate đã consider
+  itemActiveMatched: 0,      // early-bound (Stage 2 ready)
+  itemActiveUncertain: 0,    // margin thấp → không bind
+  // P2.4: NULL assignment
+  nullAssignments: 0,
 };
 
 /** P1.4: runtime calibration của hook speed. EMA (alpha=0.1). Update từ
@@ -178,6 +184,29 @@ const HOOK_SPEED_EMA_ALPHA = 0.1;
 
 /** P1.2: hookId -> HookTrajectory (samples + derived metrics) */
 const hookTrajectories = new Map();
+
+/** P2.5: sessionId -> hookId. Mỗi CastSession bind tối đa 1 hook. */
+const boundHookBySessionId = new Map();
+
+/**
+ * P2.3: Causal chain log. Map<hookId, chainEvents[]>.
+ * Mỗi entry ghi timeline: cast → hook spawn → hook active → reel → item spawn
+ * → hook remove. Dùng cho debug + post-mortem analysis.
+ * Cleanup khi hook bị remove.
+ * @type {Map<string, Array<{event:string, tick:number, time:number, data?:any}>>}
+ */
+const causalChains = new Map();
+
+/** @param {string} hookId @param {string} event @param {Record<string, any>} [data] */
+function recordCausal(hookId, event, data) {
+  let chain = causalChains.get(hookId);
+  if (!chain) {
+    chain = [];
+    causalChains.set(hookId, chain);
+  }
+  chain.push({ event, tick: system.currentTick, time: Date.now(), data });
+  log(`causal hook=${hookId} ${event}${data ? ' ' + JSON.stringify(data) : ''}`);
+}
 
 /**
  * Schedule T1, T2 samples cho 1 hook. T0 được capture inline tại spawn.
@@ -1037,12 +1066,24 @@ function selectBestCastSession(hook, hookVelocity) {
   top.secondBestScore = secondScore;
   top.margin = margin;
 
-  if (top.score >= CONFIRMED_MIN_SCORE && margin >= CONFIRMED_MIN_MARGIN) {
+  // P2.4: density-adaptive threshold. Nếu nhiều candidate cùng pass hard
+  // gate → CONFIRMED cần margin cao hơn. NULL: nếu top.score quá thấp so
+  // với threshold (kể cả sau density bonus) → UNKNOWN + return null.
+  const candidateCount = assessments.length;
+  const densityMarginBonus = Math.max(0, (candidateCount - 1) * 25);  // mỗi candidate thêm 25pt margin requirement
+  const requiredConfirmedMargin = CONFIRMED_MIN_MARGIN + densityMarginBonus;
+  const requiredAmbiguousMargin = AMBIGUOUS_MIN_MARGIN + Math.max(0, (candidateCount - 1) * 10);
+
+  if (top.score >= CONFIRMED_MIN_SCORE && margin >= requiredConfirmedMargin) {
     top.confidence = 'CONFIRMED';
-  } else if (top.score >= AMBIGUOUS_MIN_SCORE && margin >= AMBIGUOUS_MIN_MARGIN) {
+  } else if (top.score >= AMBIGUOUS_MIN_SCORE && margin >= requiredAmbiguousMargin) {
     top.confidence = 'AMBIGUOUS';
   } else {
     top.confidence = 'UNKNOWN';
+    // P2.4: NULL — không force assignment, nhưng vẫn trả về top với
+    // confidence=UNKNOWN để caller log evidence. Caller (onEntitySpawn) sẽ
+    // check confidence và fall through to fallback heuristic.
+    telemetry.nullAssignments += 1;
   }
 
   return { top, second };
@@ -1574,6 +1615,7 @@ function requestReel(player) {
     session.lastKnownPlayerLocation = cloneVector(player.location);
     if (session.state !== 'REEL_REQUESTED') {
       transition(session, 'REEL_REQUESTED');
+      recordCausal(session.hookId, 'reel', { playerId: player.id, source: 'requestReel' });
     }
     reelSignal.trigger({
       player,
@@ -1672,6 +1714,7 @@ function onFishingRodUse(event) {
     for (const decision of reelDecisions) {
       const session = decision.session;
       transition(session, 'REEL_REQUESTED');
+      recordCausal(session.hookId, 'reel', { playerId: player.id, source: 'onFishingRodUse', score: decision.score });
       session.lastKnownPlayerLocation = cloneVector(player.location);
       reelSignal.trigger({
         player,
@@ -1829,7 +1872,26 @@ function onEntitySpawn(event) {
       evidence: DEBUG ? evidence : undefined,
     };
     trackSession(session);
+    // P2.5: cast exclusivity — mark session ↔ hook binding
+    if (castSession && !castSession.synthetic) {
+      boundHookBySessionId.set(castSession.sessionId, entity.id);
+    }
     transition(session, 'FISHING');
+
+    // P2.3: causal chain
+    recordCausal(entity.id, 'cast', {
+      playerId: player.id,
+      sessionId: castSession?.sessionId,
+      sequenceId: castSession?.sequenceId,
+      synthetic: castSession?.synthetic ?? false,
+      tick: castSession?.before?.tick ?? castSession?.after?.tick,
+    });
+    recordCausal(entity.id, 'hook_spawn', {
+      playerId: player.id,
+      confidence,
+      associationMethod: session.associationMethod,
+      score: top?.score ?? 0,
+    });
 
     // Telemetry: confidence counters
     telemetry.totalHooks += 1;
@@ -1851,6 +1913,8 @@ function onEntitySpawn(event) {
 
     // P1.2: schedule hook trajectory samples T1, T2 sau spawn
     scheduleHookTrajectory(entity.id, hookSpeed);
+    // P2.3: hook_active ngay khi transition FISHING xong
+    recordCausal(entity.id, 'hook_active', { playerId: player.id });
 
     // Telemetry: associationMethod counters (P0)
     switch (session.associationMethod) {
@@ -1910,7 +1974,151 @@ function onEntitySpawn(event) {
   itemCandidates.set(entity.id, itemCandidate);
   try { entity.setDynamicProperty('fishing_caught', true); } catch { /* ignore */ }
   log(`item spawn ${itemTypeId} id=${entity.id}`, undefined);
+
+  // P2.3: item_spawn causal event. Gắn vào chain của TỪNG active session có
+  // hook gần item (dùng spatial proximity để không gắn nhầm).
+  for (const session of sessionsByHook.values()) {
+    if (session.state === 'SUCCESS' || session.state === 'CANCELLED' || session.state === 'EMPTY_REEL') continue;
+    if (session.dimensionId !== entity.dimension.id) continue;
+    const d = distance3D(session.hookLocation, entity.location);
+    if (d <= MAX_HOOK_TO_ITEM_DISTANCE * 1.5) {
+      recordCausal(session.hookId, 'item_spawn', {
+        itemId: entity.id,
+        itemTypeId,
+        dist: d.toFixed(2),
+      });
+    }
+  }
+
+  // P2.1: Item ↔ Hook active correlation. Nếu item spawn trong khi
+  // FishingSession vẫn active (hook chưa remove) → log + capture context.
+  correlateItemToActiveHook(itemCandidate);
+
   tryMatchAll();
+}
+
+/**
+ * P2.1: correlate item vừa spawn với active hook sessions. Khác với
+ * `tryMatchAll` (chỉ chạy sau hook remove), function này chạy NGAY khi
+ * item spawn — capture hookNow + itemNow để tăng evidence cho Stage 2.
+ *
+ * Nếu match đủ mạnh → mark item.matched = true NGAY (early bind).
+ * Nếu ambiguous → KHÔNG bind, để hook remove handler xử lý.
+ * @param {ItemCandidate} item
+ */
+function correlateItemToActiveHook(item) {
+  /** @type {{ session: FishingSession, score: number }[]} */
+  const scored = [];
+  for (const session of sessionsByHook.values()) {
+    if (session.state !== 'FISHING' && session.state !== 'PENDING_RESULT' && session.state !== 'REEL_REQUESTED') continue;
+    if (session.dimensionId !== item.dimensionId) continue;
+    const hookLoc = session.hookLocation;
+    const hookDist = distance3D(hookLoc, item.location);
+    if (hookDist > MAX_HOOK_TO_ITEM_DISTANCE * 1.5) continue;
+    const score = scoreActiveCorrelation(session, item);
+    if (score > 0) scored.push({ session, score });
+  }
+  if (scored.length === 0) return;
+  scored.sort((a, b) => b.score - a.score);
+  const best = scored[0];
+  const second = scored[1];
+  const margin = best.score - (second?.score ?? 0);
+
+  // P2.4: density-adaptive threshold
+  const densityBonus = Math.max(0, (scored.length - 1) * 50);
+  const threshold = MIN_CORRELATION_SCORE + densityBonus;
+
+  if (best.score < threshold) {
+    log(`item ${item.entityId} active correlation UNKNOWN best=${best.score} threshold=${threshold} count=${scored.length}`, undefined);
+    return;
+  }
+  if (scored.length > 1 && margin < 100) {
+    log(`item ${item.entityId} active correlation UNCERTAIN best=${best.score} second=${second?.score ?? 0} margin=${margin}`, undefined);
+    return;
+  }
+
+  // Early bind
+  best.session.itemCandidates ??= [];
+  best.session.itemCandidates.push(item);
+  item.matched = true;
+  log(
+    `item ${item.itemTypeId} ${item.entityId} early-bound hook=${best.session.hookId} ` +
+    `score=${best.score} margin=${margin} activeCandidates=${scored.length}`,
+    best.session.playerId
+  );
+  telemetry.itemActiveMatched += 1;
+}
+
+/**
+ * P2.1 + P2.2: score 1 FishingSession ↔ Item (active, hook còn tồn tại).
+ * @param {FishingSession} session
+ * @param {ItemCandidate} item
+ * @returns {number}
+ */
+function scoreActiveCorrelation(session, item) {
+  let score = SCORE_SESSION_ASSOCIATION;
+  const hookLoc = session.hookLocation;
+  const itemLoc = item.location;
+  const itemVel = item.velocity;
+  const itemSpeed = vecMagnitude(/** @type {Vector3} */ (itemVel));
+
+  // Spatial: hook → item distance
+  const hookDist = distance3D(hookLoc, itemLoc);
+  score += weightedProximity(hookDist, MAX_HOOK_TO_ITEM_DISTANCE, SCORE_HOOK_DISTANCE);
+
+  // Temporal: item spawn ngay sau reel (PENDING_RESULT) hoặc active
+  const tickDelta = item.spawnTick - session.hookSpawnTick;
+  score += weightedProximity(tickDelta, 60, 100);
+
+  // P2.2: item trajectory 3D
+  // direction to player
+  const playerLoc = session.lastKnownPlayerLocation;
+  const toPlayer = {
+    x: playerLoc.x - itemLoc.x,
+    y: playerLoc.y - itemLoc.y,
+    z: playerLoc.z - itemLoc.z,
+  };
+  const toPlayerMag = vecMagnitude(/** @type {Vector3} */ (toPlayer));
+
+  // direction to hook
+  const toHook = {
+    x: hookLoc.x - itemLoc.x,
+    y: hookLoc.y - itemLoc.y,
+    z: hookLoc.z - itemLoc.z,
+  };
+  const toHookMag = vecMagnitude(/** @type {Vector3} */ (toHook));
+
+  if (itemSpeed >= 0.01 && toHookMag >= 0.01) {
+    // Item velocity vs to-hook vector
+    const dot = itemVel.x * (toHook.x / toHookMag) +
+                itemVel.y * (toHook.y / toHookMag) +
+                itemVel.z * (toHook.z / toHookMag);
+    const cosA = clamp(dot / itemSpeed, -1, 1);
+    const angle = Math.acos(cosA);
+    // angle nhỏ = item bay về hook (tốt)
+    const trajScore = clamp(100 * (1 - angle / Math.PI), 0, 100);
+    score += (trajScore / 100) * SCORE_TRAJECTORY;
+  }
+
+  // Item bay về player (positive)
+  if (itemSpeed >= 0.01 && toPlayerMag >= 0.01) {
+    const dot = itemVel.x * (toPlayer.x / toPlayerMag) +
+                itemVel.y * (toPlayer.y / toPlayerMag) +
+                itemVel.z * (toPlayer.z / toPlayerMag);
+    const cosA = clamp(dot / itemSpeed, -1, 1);
+    const angle = Math.acos(cosA);
+    // angle < 90° = bay về phía player → positive
+    if (angle < Math.PI / 2) {
+      score += SCORE_NEGATIVE_TRAJECTORY;  // reuse as positive
+    } else {
+      score -= SCORE_NEGATIVE_TRAJECTORY;  // bay xa player → negative
+    }
+  }
+
+  // Reel requested bonus
+  if (session.state === 'REEL_REQUESTED') score += 50;
+
+  return score;
 }
 
 /** @param {import('@minecraft/server').EntityRemoveBeforeEvent} event */
@@ -1918,7 +2126,21 @@ function onBeforeEntityRemove(event) {
   const entity = event.removedEntity;
   if (entity.typeId !== 'minecraft:fishing_hook') return;
 
+  // P2.5: cleanup session ↔ hook binding
   const session = untrackSession(entity.id);
+  if (session?.sessionId) {
+    boundHookBySessionId.delete(session.sessionId);
+  }
+  cleanupHookTrajectory(entity.id);
+  // P2.3: log final causal chain, sau đó cleanup
+  if (session) {
+    recordCausal(entity.id, 'hook_remove', { playerId: session.playerId, state: session.state });
+  }
+  const chain = causalChains.get(entity.id);
+  if (chain) {
+    log(`causal chain hook=${entity.id} events=${chain.length}: ${chain.map((c) => c.event).join(' → ')}`, session?.playerId);
+    causalChains.delete(entity.id);
+  }
   if (!session) {
     log(`hook remove ${entity.id} no session`, undefined);
     return;
@@ -2002,6 +2224,16 @@ function startCleanupInterval() {
         cleanupHookTrajectory(hookId);
       }
     }
+
+    // P2.3: cleanup causalChains cũ (> 30s, defensive — bình thường đã bị
+    // xoá trong onBeforeEntityRemove). Tránh memory leak nếu hook bị miss.
+    for (const [hookId, chain] of causalChains) {
+      const last = chain[chain.length - 1];
+      if (now - last.time > 30000) {
+        log(`causal chain hook=${hookId} events=${chain.length} (timed out): ${chain.map((c) => c.event).join(' → ')}`, undefined);
+        causalChains.delete(hookId);
+      }
+    }
   }, CLEANUP_INTERVAL_TICKS);
 }
 
@@ -2030,7 +2262,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-01-p1-fix-trajectory', undefined);
+  log('detector initialized v2026-09-01-p2-causal-chain', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);

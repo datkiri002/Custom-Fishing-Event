@@ -98,6 +98,8 @@
  * @property {FishingState} state
  * @property {ConfidenceState} [confidence]  Owner confidence: CONFIRMED | AMBIGUOUS | FALLBACK | UNKNOWN
  * @property {EvidenceBreakdown} [evidence]  Evidence breakdown, populated khi DEBUG=true
+ * @property {ItemCandidate[]} [itemCandidates]  P2.1: items đã early-bound khi
+ *                                              hook còn active.
  */
 
 /**
