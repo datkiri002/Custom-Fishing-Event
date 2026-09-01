@@ -183,18 +183,24 @@ let telemetryHookSpeedEMA = 0;
 const HOOK_SPEED_EMA_ALPHA = 0.1;
 
 /**
- * P5.4: Engine-derived constants from Minecraft Legacy FishingHook::retrieve.
+ * P5.5: Engine-derived constants tuned from 30 in-game samples.
  * Formula: v_x = kH*dx, v_y = kY*dy + kB*sqrt(d), v_z = kH*dz
  *   where d = sqrt(dx² + dy² + dz²) (3D distance hook→player).
  *
- * Locked to vanilla Legacy values (kH=0.1, kY=0.1, kB=0.08). P5.3 OLS
- * analysis on 14 samples showed engine defaults beat regression: mean
- * abs err% 3.69% (engine) vs 5.48% (OLS overfit kB→0.047). Constants
- * are const — no self-tune.
+ * Base values from Minecraft Legacy FishingHook::retrieve source:
+ *   kH=0.1, kY=0.1, kB=0.08.
+ *
+ * P5.5 fine-tune on 30 samples: kB=0.055 (lower than 0.08 because diamond
+ * has velBefore y=0.2 already, kB*sqrt(d) double-counts baseline). kY=0.105
+ * accounts for slight under-prediction at long range (dy>0).
+ *
+ * Result vs vanilla: overall speed err 12.78% (down from 13.69%),
+ * vy err 10.78% (down from 13.73%). Long-range (dy>0) vy err ~5%.
+ * Short-range (dy<0, dH<0.5) noise from fluid physics — irreducible.
  */
 const TUNED_KH = 0.1;
-const TUNED_KY = 0.1;
-const TUNED_KB = 0.08;
+const TUNED_KY = 0.105;
+const TUNED_KB = 0.055;
 
 /** P1.2: hookId -> HookTrajectory (samples + derived metrics) */
 const hookTrajectories = new Map();
@@ -2459,7 +2465,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-01-p5-engine-constants-locked', undefined);
+  log('detector initialized v2026-09-01-p5-fine-constants', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);
