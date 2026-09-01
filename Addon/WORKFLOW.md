@@ -1,4 +1,4 @@
-# WORKFLOW — Stress Test Scenarios (A→Q)
+# WORKFLOW — Stress Test Scenarios (A→Q + R→AP)
 
 Manual test plan cho Stage 1 Cast→Hook association engine. 17 scenarios từ ChatGPT review v2.
 
@@ -178,3 +178,266 @@ Mục tiêu trong 1 session test thường:
 - **Bobber trajectory time-series**: chỉ dùng velocity tại spawn, không lấy 2-5 tick sau.
 - **ML/auto-tune weights**: weights hardcode, đủ evidence ở runtime.
 - **Per-player confidence history**: không có, evidence 1 lần đủ.
+
+---
+
+# Phase R→AP — Stage 2 + High-precision stress (33 scenarios)
+
+Test plan bổ sung cho Stage 2 (item ↔ hook active correlation), cast/reel
+discrimination, hook velocity calibration, density-adaptive threshold, NULL
+assignment, cast exclusivity. Mỗi scenario tập trung 1 khía cạnh edge case
+mà Stage 1 (A→Q) chưa cover.
+
+Cấu trúc mỗi scenario giống A→Q: Setup / Action / Expected / Verify / Telemetry.
+
+## Cast vs Reel discrimination (P1.5)
+
+### R. Rod use khi hook đã active (REEL path, no new session)
+
+| Field | Value |
+|-------|-------|
+| Setup | Cast, đợi hook spawn xong, đứng yên. |
+| Action | Right-click Rod lần 2 (khi hook còn bay). |
+| Expected | KHÔNG tạo CastSession mới. Trigger `reelSignal`. Session chuyển → `REEL_REQUESTED`. |
+| Verify | `castSessionsByPlayer[player].length` KHÔNG tăng. |
+| Causal | chain có `cast → hook_spawn → hook_active → reel` (không có `cast` thứ 2). |
+
+### S. Rod use khi KHÔNG có active hook (CAST path)
+
+| Field | Value |
+|-------|-------|
+| Setup | Đứng yên, chưa cast. |
+| Action | Right-click Rod. |
+| Expected | Tạo CastSession mới. Hook spawn. |
+| Verify | `castSessionsByPlayer[player].length` +1. Causal chain có `cast → hook_spawn`. |
+
+### T. Rapid cast (3 lần trong 1s, mỗi lần active hook đã remove)
+
+| Field | Value |
+|-------|-------|
+| Setup | Đứng yên, hook cũ đã kết thúc. |
+| Action | Cast 3 lần liên tiếp (đợi hook remove sau mỗi lần). |
+| Expected | Mỗi lần = 1 CastSession riêng, sequenceId tăng 1-2-3. |
+| Verify | `sequenceByPlayer[player]` = 3 sau test. |
+
+### U. Rapid cast trong khi hook cũ còn active (chỉ lần 1 là cast, 2-3 là reel)
+
+| Field | Value |
+|-------|-------|
+| Setup | Cast (hook active), tiếp tục right-click 2 lần ngay sau đó. |
+| Expected | Lần 1 = CAST. Lần 2-3 = REEL candidates. Không cast mới. |
+| Verify | `castSessionsByPlayer[player].length` = 1. |
+
+## Hook trajectory time-series (P1.2)
+
+### V. Hook bay đúng hướng, stable trajectory (high directionStability)
+
+| Field | Value |
+|-------|-------|
+| Setup | Cast bình thường, hook bay thẳng về phía trước. |
+| Expected | `directionStability` > 80. `velocityConsistency` > 70. |
+| Telemetry | `trajectorySamplesTotal+3` (T0+T1+T2). |
+
+### W. Hook bị block ngay sau spawn (low directionStability)
+
+| Field | Value |
+|-------|-------|
+| Setup | Cast vào tường cách 2 blocks. |
+| Expected | T1/T2 direction lệch mạnh → `directionStability` < 30. Score bị penalty. |
+| Telemetry | `trajectorySamplesDropped+1` (nếu hook bị remove trước T2). |
+
+### X. Hook remove trước T2 (incomplete trajectory)
+
+| Field | Value |
+|-------|-------|
+| Setup | Cast, hook rơi xuống nước rồi bobber pickup ngay. |
+| Expected | `samples.length` = 1 hoặc 2. Không crash. |
+| Telemetry | `trajectorySamplesDropped+1`. |
+
+## Hook velocity calibration (P1.4)
+
+### Y. EMA calibration sau 5+ CONFIRMED hooks
+
+| Field | Value |
+|-------|-------|
+| Setup | Cast 5 lần CONFIRMED liên tiếp. |
+| Expected | `telemetryHookSpeedEMA` converges về giá trị thật của bobber. |
+| Telemetry | `hookSpeedSamples+5`. |
+
+### Z. Hook tĩnh (vel = 0) — early cast tick
+
+| Field | Value |
+|-------|-------|
+| Setup | Cast, hook spawn nhưng velocity = 0 (vừa spawn 1 tick). |
+| Expected | `CAST_HOOK_VEL_MIN` gate fail → score thấp nhưng không crash. |
+| Verify | `evidence.hookVelocity` ≈ 0. Dùng expected 50 neutral. |
+
+## Item ↔ Hook active correlation (P2.1)
+
+### AA. Item spawn khi hook còn active (early bind)
+
+| Field | Value |
+|-------|-------|
+| Setup | Cast, đợi hook spawn, đợi 1-2s, hook pickup → item spawn tại hook location. |
+| Expected | `correlateItemToActiveHook` chạy. Score cao, margin cao → early bind. |
+| Telemetry | `itemActiveCandidates+1, itemActiveMatched+1`. |
+| Causal | chain có `... → item_spawn → hook_remove`. |
+
+### AB. Item spawn ở dimension khác với hook
+
+| Field | Value |
+|-------|-------|
+| Setup | Cast Overworld, teleport Nether, catch Nether. |
+| Expected | `correlateItemToActiveHook` skip (dimension mismatch). Item không bind. |
+| Verify | `itemActiveMatched` không tăng. |
+
+### AC. 2 hooks active cùng lúc, item spawn giữa (uncertain)
+
+| Field | Value |
+|-------|-------|
+| Setup | 2 player, mỗi người 1 hook, item spawn ở giữa cách đều. |
+| Expected | Score cả 2 session gần nhau → margin < 100 → `UNCERTAIN`, không early bind. |
+| Telemetry | `itemActiveUncertain+1`. |
+
+### AD. Item spawn xa hook (> MAX_HOOK_TO_ITEM_DISTANCE * 1.5)
+
+| Field | Value |
+|-------|-------|
+| Setup | Cast, hook pickup, teleport xa 30 blocks, item spawn. |
+| Expected | Distance gate fail → skip. |
+| Verify | `itemActiveCandidates` không tăng. |
+
+## Item trajectory 3D (P2.2)
+
+### AE. Item bay thẳng về player (high alignment)
+
+| Field | Value |
+|-------|-------|
+| Setup | Hook pickup → item bay parabola về player. |
+| Expected | `scoreActiveCorrelation` cao do trajectory alignment > 80. |
+| Telemetry | `itemActiveMatched+1`. |
+
+### AF. Item bobbing ngẫu nhiên (no direction)
+
+| Field | Value |
+|-------|-------|
+| Setup | Item spawn với velocity ≈ 0 (rơi xuống đất). |
+| Expected | Trajectory alignment = 0. Spatial + temporal vẫn pass. |
+| Verify | Score giảm nhưng vẫn có thể match. |
+
+## NULL assignment + density-adaptive threshold (P2.4)
+
+### AG. Margin dưới CONFIRMED_MIN_MARGIN → UNKNOWN (NULL)
+
+| Field | Value |
+|-------|-------|
+| Setup | 2 player gần nhau, cùng cast, cùng view. |
+| Expected | Top score 700, second 650, margin 50 < CONFIRMED_MIN_MARGIN=150. → `UNKNOWN`. |
+| Telemetry | `nullAssignments+1, unknown+1`. |
+
+### AH. 3+ candidates, density bonus (margin tăng theo n-1)
+
+| Field | Value |
+|-------|-------|
+| Setup | 3 player cùng cast cùng tick, cùng vị trí. |
+| Expected | `requiredConfirmedMargin = 150 + (3-1)*25 = 200`. Margin thấp hơn → UNKNOWN. |
+| Telemetry | `nullAssignments+1`. |
+
+### AI. 1 candidate, margin 200, score 750 → CONFIRMED (no density bonus)
+
+| Field | Value |
+|-------|-------|
+| Setup | Solo cast bình thường. |
+| Expected | CONFIRMED. Margin cao. |
+| Telemetry | `confirmed+1, directConfirmed+1`. |
+
+## Cast exclusivity (P2.5)
+
+### AJ. 2 hook spawn cùng tick, 2 session khác nhau (P2.5 hard rule)
+
+| Field | Value |
+|-------|-------|
+| Setup | 2 session khác nhau (P1 cast, P2 cast), cùng tick spawn 2 hook gần nhau. |
+| Expected | Mỗi hook bind 1 session, không share. `boundHookBySessionId.size` = 2. |
+| Verify | `session.sessionId` của 2 hook khác nhau. |
+
+### AK. Session cũ hết hạn, hook mới bind lại (cleanup)
+
+| Field | Value |
+|-------|-------|
+| Setup | Cast, đợi > 3s (CAST_TTL_MS), cast lại. |
+| Expected | Session cũ expire. Session mới bind. |
+| Verify | `castSessionsByPlayer[player].length` không vượt quá 3 (TTL limit). |
+
+## Causal chain log (P2.3)
+
+### AL. Full chain: cast → spawn → active → reel → item → remove
+
+| Field | Value |
+|-------|-------|
+| Setup | Cast, đợi hook spawn, đợi bobber, reel, catch item, hook remove. |
+| Expected | Causal chain có 6 events theo thứ tự. |
+| Verify | Log `causal chain hook=... events=6: cast → hook_spawn → hook_active → reel → item_spawn → hook_remove`. |
+
+### AM. Empty reel: cast → spawn → active → remove (no item)
+
+| Field | Value |
+|-------|-------|
+| Setup | Cast, hook pickup không có fish. |
+| Expected | Causal chain: 4 events, không có `item_spawn` và `reel`. |
+| Verify | `events=4: cast → hook_spawn → hook_active → hook_remove`. |
+
+### AN. Cancelled by user (R-key): cast → spawn → active → remove
+
+| Field | Value |
+|-------|-------|
+| Setup | Cast rồi switch slot khác (cancel). |
+| Expected | Causal chain tương tự AM, hook bị remove bởi player. |
+| Telemetry | `cancelled+1`. |
+
+## Telemetry dashboard (P3)
+
+### AO. Telemetry counters tổng hợp
+
+| Counter | Mục đích | Mục tiêu |
+|---------|----------|----------|
+| `totalHooks` | Tổng hook xử lý | — |
+| `confirmed` | Hook CONFIRMED | ≥ 0.7 (cast solo) |
+| `ambiguous` | Hook AMBIGUOUS | ≤ 0.2 |
+| `unknown` | Hook UNKNOWN | ≤ 0.1 |
+| `fallback` | Hook FALLBACK | ≤ 0.1 |
+| `directConfirmed` | DIRECT_CONFIRMED method | = confirmed |
+| `directAmbiguous` | DIRECT_AMBIGUOUS method | = ambiguous |
+| `tentative` | TENTATIVE (backfill) | ≤ 0.05 |
+| `fallbackSem` | FALLBACK semantic | = fallback |
+| `unknownSem` | UNKNOWN semantic | = unknown |
+| `raceFixSynthetic` | Race fix v2 dùng synthetic session | phụ thuộc timing |
+| `pendingBeforeEnqueued` | BEFORE snapshot push queue | = total casts |
+| `pendingBeforeMatched` | BEFORE matched khi register | ≥ 0.95 (rest = race fix) |
+| `pendingBeforeExpired` | BEFORE expire stale | ≤ 0.05 |
+| `trajectorySamplesTotal` | T0+T1+T2 samples captured | ≥ 2.5 * totalHooks |
+| `trajectorySamplesDropped` | Hook remove trước T2 | ≤ 0.3 * totalHooks |
+| `hookSpeedSamples` | EMA update từ CONFIRMED | ≥ 0.7 * totalHooks |
+| `itemActiveCandidates` | Item considered for early bind | — |
+| `itemActiveMatched` | Item early-bound | ≥ 0.5 * itemActiveCandidates (khi active) |
+| `itemActiveUncertain` | Item UNCERTAIN, skip | ≤ 0.3 * itemActiveCandidates |
+| `nullAssignments` | UNKNOWN do margin thấp | ≤ 0.1 * totalHooks |
+
+### AP. Ground truth comparison matrix
+
+In-game test phải điền matrix:
+
+| Scenario | Expected Owner | Actual Owner | Expected Confidence | Actual Confidence | Pass/Fail |
+|----------|---------------|--------------|---------------------|-------------------|-----------|
+| A | P1 | ___ | CONFIRMED | ___ | ___ |
+| B | P1 (top) | ___ | CONFIRMED | ___ | ___ |
+| ... | ... | ... | ... | ... | ... |
+| R | (no cast) | ___ | (reel) | ___ | ___ |
+| ... | ... | ... | ... | ... | ... |
+| AL | P1 | ___ | CONFIRMED | ___ | ___ |
+
+**Mục tiêu cuối cùng**:
+- `correct owner / totalHooks` ≥ 0.85
+- `wrong owner` = 0 (RIGHT > WRONG > UNRESOLVED)
+- `null + unknown` ≤ 0.15
+- Causal chain đầy đủ cho 100% Stage 2 catches (AA-AL).
