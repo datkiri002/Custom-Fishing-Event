@@ -64,6 +64,7 @@ $metrics = [ordered]@{
   hookSpeedStd = 0.0
   hookSpeedEMA = 0.0
   reelMarginAvg = 0.0
+  telemetryDumped = $false
 }
 
 $hookRx = [regex]'\[fishing\] hook spawn (\S+) owner=(\S+) confidence=(\S+) associationMethod=(\S+) castConfirmed=(\S+) score=(\S+) margin=(\S+)'
@@ -124,6 +125,41 @@ foreach ($r in $hookResults) {
 
 # Telemetry counters from log lines
 foreach ($line in $lines) {
+  # P6.0: structured telemetry dump (preferred — overrides regex-derived counts)
+  if ($line -match '\[fishing\] telemetry (\{.*\})') {
+    try {
+      $dump = $Matches[1] | ConvertFrom-Json -ErrorAction SilentlyContinue
+      if ($dump) {
+        $metrics.totalHooks = [int]$dump.totalHooks
+        $metrics.confirmed = [int]$dump.confirmed
+        $metrics.ambiguous = [int]$dump.ambiguous
+        $metrics.unknown = [int]$dump.unknown
+        $metrics.fallback = [int]$dump.fallback
+        $metrics.directConfirmed = [int]$dump.directConfirmed
+        $metrics.directAmbiguous = [int]$dump.directAmbiguous
+        $metrics.raceFixSynthetic = [int]$dump.raceFixSynthetic
+        $metrics.pendingBeforeEnqueued = [int]$dump.pendingBeforeEnqueued
+        $metrics.pendingBeforeMatched = [int]$dump.pendingBeforeMatched
+        $metrics.pendingBeforeExpired = [int]$dump.pendingBeforeExpired
+        $metrics.trajectorySamplesTotal = [int]$dump.trajectorySamplesTotal
+        $metrics.trajectorySamplesDropped = [int]$dump.trajectorySamplesDropped
+        $metrics.hookSpeedSamples = [int]$dump.hookSpeedSamples
+        $metrics.hookSpeedMean = [double]$dump.hookSpeedMean
+        $metrics.hookSpeedStd = [double]$dump.hookSpeedStd
+        $metrics.hookSpeedEMA = [double]$dump.hookSpeedEMA
+        $metrics.itemActiveCandidates = [int]$dump.itemActiveCandidates
+        $metrics.itemActiveMatched = [int]$dump.itemActiveMatched
+        $metrics.itemActiveUncertain = [int]$dump.itemActiveUncertain
+        $metrics.nullAssignments = [int]$dump.nullAssignments
+        $metrics.causalChainsLogged = [int]$dump.causalChainsLogged
+        $metrics.reelTotal = [int]$dump.reelTotal
+        $metrics.reelAssociated = [int]$dump.reelAssociated
+        $metrics.reelUncertain = [int]$dump.reelUncertain
+        $metrics.invariantViolations = [int]$dump.invariantViolations
+        $metrics.telemetryDumped = $true
+      }
+    } catch {}
+  }
   if ($line -match '\[fishing\] traj captured hook=') { $metrics.trajectorySamplesTotal += 1 }
   if ($line -match '\[fishing\] traj sample skip') { $metrics.trajectorySamplesDropped += 1 }
   if ($line -match '\[fishing\] hook-speed stats n=(\d+) mean=([\d\.]+) std=([\d\.]+) ema=([\d\.]+)') {
@@ -159,6 +195,7 @@ if ($metrics.totalHooks -gt 0) {
 
 # Output AO dashboard
 "===== P3.1 TELEMETRY DASHBOARD (WORKFLOW.md AO) ====="
+"Source: $(if ($metrics.telemetryDumped) { 'telemetry dump (P6.0)' } else { 'regex-derived' })"
 ""
 
 $aoTargets = @{

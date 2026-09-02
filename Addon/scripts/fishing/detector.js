@@ -1920,6 +1920,36 @@ function processCatch(removedHook, player) {
     removedHook.playerId
   );
   catchSignal.trigger(afterEvent);
+  // P6.0: dump structured telemetry counters cho post-mortem analysis
+  const dump = {
+    totalHooks: telemetry.totalHooks,
+    confirmed: telemetry.confirmed,
+    ambiguous: telemetry.ambiguous,
+    unknown: telemetry.unknown,
+    fallback: telemetry.fallback,
+    directConfirmed: telemetry.directConfirmed,
+    directAmbiguous: telemetry.directAmbiguous,
+    raceFixSynthetic: telemetry.raceFixSynthetic,
+    pendingBeforeEnqueued: telemetry.pendingBeforeEnqueued,
+    pendingBeforeMatched: telemetry.pendingBeforeMatched,
+    pendingBeforeExpired: telemetry.pendingBeforeExpired,
+    trajectorySamplesTotal: telemetry.trajectorySamplesTotal,
+    trajectorySamplesDropped: telemetry.trajectorySamplesDropped,
+    hookSpeedSamples: telemetry.hookSpeedSamples,
+    hookSpeedMean: telemetryHookSpeedMean,
+    hookSpeedStd: telemetryHookSpeedStd,
+    hookSpeedEMA: telemetryHookSpeedEMA,
+    itemActiveCandidates: telemetry.itemActiveCandidates,
+    itemActiveMatched: telemetry.itemActiveMatched,
+    itemActiveUncertain: telemetry.itemActiveUncertain,
+    nullAssignments: telemetry.nullAssignments,
+    causalChainsLogged: telemetry.causalChainsLogged,
+    reelTotal: telemetry.reelTotal,
+    reelAssociated: telemetry.reelAssociated,
+    reelUncertain: telemetry.reelUncertain,
+    invariantViolations: telemetry.invariantViolations,
+  };
+  log(`telemetry ${JSON.stringify(dump)}`, removedHook.playerId);
 }
 
 /**
