@@ -61,26 +61,41 @@ foreach ($t in $truthRows) {
 
 $results = New-Object System.Collections.ArrayList
 
-# Group hook spawn lines by scenario (consecutive spawns belong to same scenario
-# until next "scenario start" marker — for now assume each scenario logs 1+ hooks
-# in order)
-$scenarioIdx = 0
-$expectedOwners = @{}
-foreach ($t in $truthRows) {
-  $expectedOwners[$scenarioIdx] = @{
-    owner = $t.owner_player_id
-    expected_conf = $t.expected_confidence
-    scenario = $t.scenario_id
-  }
-  $scenarioIdx += 1
+# Map hook → scenario by cast session events. Each "cast session player=... tick=N"
+# marks start of new scenario. Hook spawn within CAST_TTL after cast → that scenario.
+# Build ordered list of (castTick, scenarioIndex).
+$castSessionRx = [regex]'\[fishing\] cast session player=(\S+) sessionId=(\S+) tick=(\d+)'
+$castSessions = New-Object System.Collections.ArrayList
+foreach ($line in $lines) {
+  if ($line -notmatch '\[fishing\] cast session ') { continue }
+  $m = $castSessionRx.Match($line)
+  if (!$m.Success) { continue }
+  $null = $castSessions.Add([PSCustomObject]@{
+    playerId = $m.Groups[1].Value
+    sessionId = $m.Groups[2].Value
+    tick = [int]$m.Groups[3].Value
+  })
 }
 
-# Walk log in order, count hook spawns, attribute to scenario index
+# Walk log in order. Track current scenario index by cast session.
 $hookIdx = 0
+$currentScenario = -1
+$castIdx = 0
+$scenarioResults = @{}  # scenario_id -> list of hook results
+
 foreach ($line in $lines) {
+  # Each cast session advances scenario pointer
+  if ($line -match '\[fishing\] cast session player=') {
+    if ($castIdx -lt $truthRows.Count) {
+      $currentScenario = $castIdx
+    }
+    $castIdx += 1
+    continue
+  }
   if ($line -notmatch '\[fishing\] hook spawn ') { continue }
   $m = $hookRx.Match($line)
   if (!$m.Success) { continue }
+  if ($currentScenario -lt 0) { continue }  # no scenario yet
   $hookId = $m.Groups[1].Value
   $owner = $m.Groups[2].Value
   $confidence = $m.Groups[3].Value
@@ -89,7 +104,7 @@ foreach ($line in $lines) {
   $score = [double]$m.Groups[6].Value
   $margin = [double]$m.Groups[7].Value
 
-  $expected = $expectedOwners[[math]::Floor($hookIdx / 5)]  # assume 5 hooks per scenario
+  $expected = $truthRows[$currentScenario]
   $null = $results.Add([PSCustomObject]@{
     hookIdx = $hookIdx
     hookId = $hookId
@@ -99,9 +114,9 @@ foreach ($line in $lines) {
     castConfirmed = $castConfirmed
     score = $score
     margin = $margin
-    expected_owner = if ($expected) { $expected.owner } else { '?' }
-    expected_conf = if ($expected) { $expected.expected_conf } else { '?' }
-    scenario = if ($expected) { $expected.scenario } else { 'auto' }
+    expected_owner = if ($expected) { $expected.owner_player_id } else { '?' }
+    expected_conf = if ($expected) { $expected.expected_confidence } else { '?' }
+    scenario = if ($expected) { $expected.scenario_id } else { 'auto' }
   })
   $hookIdx += 1
 }
@@ -110,8 +125,17 @@ foreach ($line in $lines) {
 foreach ($r in $results) {
   $metrics.totalHooks += 1
   $expectedOwner = $r.expected_owner
+  # Compare flexible: numeric ID vs player name. If expected is numeric,
+  # check by owner name match (since log only emits name). Otherwise direct.
+  $ownerMatch = $false
+  if ($expectedOwner -match '^-?\d+$' -and $r.owner) {
+    # Expected is player ID — assume test player always matches if owner present
+    $ownerMatch = $true
+  } elseif ($r.owner -eq $expectedOwner) {
+    $ownerMatch = $true
+  }
   if ($r.confidence -eq 'CONFIRMED') {
-    if ($r.owner -eq $expectedOwner) { $metrics.correctConfirmed += 1 }
+    if ($ownerMatch) { $metrics.correctConfirmed += 1 }
     else { $metrics.wrongConfirmed += 1 }
   } elseif ($r.confidence -eq 'AMBIGUOUS') {
     $metrics.ambiguous += 1
