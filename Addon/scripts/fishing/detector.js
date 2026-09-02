@@ -1168,14 +1168,14 @@ function assessCastHookAssociation(hook, player, session, hookVelocity) {
       },
     };
     const posErr = distance3D(hookLoc, expectedT0.pos);
-    const velErr = distance3D(hookVel, expectedT0.vel);
-    const obsMag = vecMagnitude(hookVel);
+    const velErr = distance3D(hookVelocity, expectedT0.vel);
+    const obsMag = vecMagnitude(hookVelocity);
     const expMag = vecMagnitude(expectedT0.vel);
     let dirErr = 0;
     if (obsMag > 0.01 && expMag > 0.01) {
-      const dot = hookVel.x * expectedT0.vel.x +
-                  hookVel.y * expectedT0.vel.y +
-                  hookVel.z * expectedT0.vel.z;
+      const dot = hookVelocity.x * expectedT0.vel.x +
+                  hookVelocity.y * expectedT0.vel.y +
+                  hookVelocity.z * expectedT0.vel.z;
       dirErr = Math.acos(clamp(dot / (obsMag * expMag), -1, 1));
     }
     // P1.2 fix3: Bedrock hook is bobber (gần như stationary sau spawn).
@@ -2773,7 +2773,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-02-p1-dedupe', undefined);
+  log('detector initialized v2026-09-02-p1-dedupe-fix2', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);
