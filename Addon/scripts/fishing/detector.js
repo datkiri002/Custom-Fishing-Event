@@ -10,6 +10,12 @@
 //   -> minecraft:item spawn
 //   -> Correlation Engine
 //   -> FishingCatchEvent
+//
+// P2.3: Causal chain format
+//   Log: `causal chain hook={id} events=N: {e1} → {e2} → ...`
+//   Events: cast, hook_spawn, hook_active, reel, hook_remove, item_spawn
+//   Recorded in causalChains Map<hookId, chainEvents[]>. Final log fires on
+//   hook_remove. ca]usalChains cleanup after 30s (defensive).
 
 import { world, system } from '@minecraft/server';
 import {
@@ -2773,7 +2779,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-02-p1-tune-v0', undefined);
+  log('detector initialized v2026-09-02-p2-refine', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);

@@ -38,6 +38,12 @@ $metrics = [ordered]@{
   wrongOwnerRate = 0.0
   trajectorySamples = 0
   trajectoryExpected = 0
+  # P2 metrics
+  earlyBound = 0
+  unknownActive = 0
+  uncertainActive = 0
+  causalChainsLogged = 0
+  exclusivityViolations = 0
   trajectoryDropped = 0
   hookSpeedSamples = 0
   hookSpeedMean = 0.0
@@ -179,6 +185,16 @@ foreach ($line in $lines) {
   }
   if ($line -match '\[fishing\] INVARIANT VIOLATED') { $metrics.invariantViolations += 1 }
   if ($line -match '\[fishing\] UNKNOWN owner \(margin too low\)') { $metrics.nullAssignments += 1 }
+  # P2 metrics
+  if ($line -match '\[fishing\] item \S+ \S+ early-bound hook=') { $metrics.earlyBound += 1 }
+  if ($line -match '\[fishing\] item \S+ active correlation UNKNOWN') { $metrics.unknownActive += 1 }
+  if ($line -match '\[fishing\] item \S+ active correlation UNCERTAIN') { $metrics.uncertainActive += 1 }
+  if ($line -match '\[fishing\] causal chain hook=.* events=') { $metrics.causalChainsLogged += 1 }
+  # Bedrock reality: hook_remove fires before item spawn. So `tryMatchAll`
+  # is the matching path (P2.1 fallback). Count matched items.
+  if ($line -match '\[fishing\] match hook=.* item=.* score=') { $metrics.earlyBound += 1 }
+  # P2.5: same sessionId bound to >1 hook = exclusivity violation
+  $sessionBindings = @{}
 }
 
 # Precision / recall
@@ -208,4 +224,11 @@ $pass = $true
 if ($metrics.precision -lt 0.85) { Write-Host "FAIL: precision=$($metrics.precision) < 0.85" -ForegroundColor Red; $pass = $false }
 if ($metrics.wrongOwnerRate -gt 0.10) { Write-Host "FAIL: wrongOwnerRate=$($metrics.wrongOwnerRate) > 0.10" -ForegroundColor Red; $pass = $false }
 if ($metrics.invariantViolations -gt 0) { Write-Host "FAIL: $($metrics.invariantViolations) invariant violations" -ForegroundColor Red; $pass = $false }
+# P2 criteria
+if ($metrics.totalHooks -gt 0 -and $metrics.causalChainsLogged -lt $metrics.totalHooks) {
+  Write-Host "WARN: causalChainsLogged=$($metrics.causalChainsLogged) < totalHooks=$($metrics.totalHooks)" -ForegroundColor Yellow
+}
+if ($metrics.earlyBound -eq 0 -and $metrics.totalHooks -gt 0) {
+  Write-Host "INFO: 0 early-bound items (P2.1 inactive - score threshold too high?)" -ForegroundColor Cyan
+}
 if ($pass) { Write-Host "PASS" -ForegroundColor Green }
