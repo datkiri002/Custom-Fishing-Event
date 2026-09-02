@@ -2559,7 +2559,12 @@ function onBeforeEntityRemove(event) {
   if (session?.sessionId) {
     boundHookBySessionId.delete(session.sessionId);
   }
-  cleanupHookTrajectory(entity.id);
+  // P1.2 fix: defer cleanupHookTrajectory 5 ticks. system.runTimeout T1/T2
+  // có thể fire SAU hook_remove (cùng tick batch) — nếu cleanup ngay,
+  // traj=undefined → trajectoryMatchScore = 0. Defer 5 tick = chắc chắn
+  // T1 (1 tick) + T2 (2 tick) đã chạy xong.
+  const hookIdForTraj = entity.id;
+  system.runTimeout(() => cleanupHookTrajectory(hookIdForTraj), 5);
   // P4.2: cleanup hysteresis cache
   committedAssignments.delete(entity.id);
   // P2.3: log final causal chain, sau đó cleanup
