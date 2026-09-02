@@ -30,15 +30,39 @@ export const FALLBACK_OWNER_SCORE_MARGIN = 20;
 export const ENABLE_PICKUP_INTERCEPTION = true;
 
 // ===== Stage 1 evidence weights (tổng = 1000) =====
-// P1.3: de-correlate. Ray + direction + angular gom vào CAST_KINEMATIC_WEIGHT.
-// playerMomentum penalty đổi thành motion compensation prediction.
-export const WEIGHT_TEMPORAL = 150;
-export const WEIGHT_SPATIAL = 200;
-export const CAST_KINEMATIC_WEIGHT = 400;  // ray + direction + angular (gom)
-export const WEIGHT_HOOK_VELOCITY = 100;
-export const CAST_PREDICTION_WEIGHT = 100; // motion compensation (P1.1)
-export const CAST_EXPECTED_WEIGHT = 50;    // hook velocity vs expected trajectory
-// Tổng: 150+200+400+100+100+50 = 1000
+// P1.4: de-correlate thành Spatial / Kinematic / Model groups.
+// Spatial (location + drift): 250, Kinematic (ray + direction + angular + speed): 350,
+// Model (motion-comp + trajectory): 300, Temporal: 100.
+export const WEIGHT_TEMPORAL = 100;
+export const WEIGHT_SPATIAL = 250;
+export const CAST_KINEMATIC_WEIGHT = 350;  // ray + direction + angular + speed (gom)
+export const CAST_MODEL_WEIGHT = 300;      // motion compensation + trajectory match
+
+// P1.4: Kinematic sub-weights (tổng 350)
+export const KINEMATIC_RAY_WEIGHT = 100;
+export const KINEMATIC_DIRECTION_WEIGHT = 100;
+export const KINEMATIC_ANGULAR_WEIGHT = 100;
+export const KINEMATIC_HOOKSPEED_WEIGHT = 50;
+
+// P1.4: Model sub-weights (tổng 300)
+export const MODEL_MOTIONCOMP_WEIGHT = 100;
+export const MODEL_TRAJECTORY_WEIGHT = 200;
+
+// P1.2: Expected trajectory calibration (Bedrock hook physics).
+// Hook spawns at player head + viewDir * EXPECTED_HOOK_SPAWN_DIST.
+// Velocity starts at EXPECTED_HOOK_V0, drag 0.98/tick, no gravity (2 tick đầu).
+export const EXPECTED_HOOK_SPAWN_DIST = 1.2;
+export const EXPECTED_HOOK_V0 = 0.6;
+export const EXPECTED_HOOK_DRAG = 0.98;
+export const EXPECTED_HOOK_TRAJECTORY_TOLERANCE = 1.0;  // block error cap
+
+// P1.10: Reel weights (lifetime giảm, distance + session tăng).
+// Tổng 1000.
+export const REEL_WEIGHT_DISTANCE = 400;
+export const REEL_WEIGHT_SESSION = 350;
+export const REEL_WEIGHT_STATE = 150;
+export const REEL_WEIGHT_LIFETIME = 50;
+export const REEL_WEIGHT_SEQUENCE = 50;
 
 // Cast→Hook thresholds (ray projection)
 export const CAST_RAY_MIN_PROJECTION = 0.5;       // <0.5 = nhìn ngược hướng hook

@@ -1,0 +1,19 @@
+scenario_id,owner_player_id,expected_confidence,notes
+1_solo,p1,CONFIRMED,solo cast
+2_2p_same_tick,p1,CONFIRMED,2 players same tick
+3_2p_same_tick_same_dir,p1,CONFIRMED,2 players same tick + same direction
+4_2p_close_diff_dir,p1,CONFIRMED,2 players close + different directions
+5_3p_close,p1,CONFIRMED,3 players close
+6_5p,p1,CONFIRMED,5 players
+7_10p,p1,CONFIRMED,10 players
+8_multi_session_same_p,p1,CONFIRMED,multiple sessions same Player
+9_same_tick_rapid,p1,CONFIRMED,same-tick rapid casts
+10_player_running,p1,CONFIRMED,Player running
+11_player_jumping,p1,CONFIRMED,Player jumping
+12_player_turning,p1,CONFIRMED,Player turning
+13_cast_immediate_reel,p1,CONFIRMED,cast + immediate reel
+14_old_hook_new_cast,p1,CONFIRMED,old hook + new cast
+15_multi_active_hooks,p1,CONFIRMED,multiple active hooks per Player
+16_hook_spawn_after_itemUse,p1,CONFIRMED,Hook spawn after itemUse
+17_trajectory_distractor,p1,CONFIRMED,Hook trajectory distractor
+18_ambiguous_near_equal,p1,AMBIGUOUS,ambiguous near-equal candidate
