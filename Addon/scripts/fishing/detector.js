@@ -1380,9 +1380,18 @@ function selectBestCastSession(hook, hookVelocity) {
 
   if (assessments.length === 0) return { top: null, second: null };
 
-  assessments.sort((a, b) => b.score - a.score);
-  const top = assessments[0];
-  const second = assessments[1] ?? null;
+  // P1.x fix: dedupe cùng playerId — nếu cùng player có nhiều candidate
+  // (synthetic + complete, rapid cast), chỉ lấy max score. Tránh
+  // densityMarginBonus penalty sai khi 1 player nhưng 2+ cast events overlap.
+  const byPlayer = new Map();
+  for (const a of assessments) {
+    const cur = byPlayer.get(a.playerId);
+    if (!cur || a.score > cur.score) byPlayer.set(a.playerId, a);
+  }
+  const deduped = Array.from(byPlayer.values());
+  deduped.sort((a, b) => b.score - a.score);
+  const top = deduped[0];
+  const second = deduped[1] ?? null;
 
   // State mapping dựa trên score + margin
   const secondScore = second?.score ?? 0;
@@ -2764,7 +2773,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-02-p1-t0-inline', undefined);
+  log('detector initialized v2026-09-02-p1-dedupe', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);
