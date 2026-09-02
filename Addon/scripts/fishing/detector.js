@@ -183,24 +183,33 @@ let telemetryHookSpeedEMA = 0;
 const HOOK_SPEED_EMA_ALPHA = 0.1;
 
 /**
- * P5.5: Engine-derived constants tuned from 30 in-game samples.
- * Formula: v_x = kH*dx, v_y = kY*dy + kB*sqrt(d), v_z = kH*dz
- *   where d = sqrt(dx² + dy² + dz²) (3D distance hook→player).
+ * P6.0: Refined constants from 30-sample vector-error analysis (analyze_vec.ps1).
+ *   formula: v_x = kH * dx
+ *            v_y = kY * dy + kB * sqrt(d) + c0
+ *            v_z = kH * dz
+ *   where d = sqrt(dx² + dy² + dz²).
  *
- * Base values from Minecraft Legacy FishingHook::retrieve source:
- *   kH=0.1, kY=0.1, kB=0.08.
+ * Per-component MAE on 30 samples:
+ *   vx:  0.0009
+ *   vy:  0.0151
+ *   vz:  0.0012
+ *   |V|: 0.0157  (down from 0.2251 with P5.5 fine constants — 93% reduction)
  *
- * P5.5 fine-tune on 30 samples: kB=0.055 (lower than 0.08 because diamond
- * has velBefore y=0.2 already, kB*sqrt(d) double-counts baseline). kY=0.105
- * accounts for slight under-prediction at long range (dy>0).
+ * Key insight: vanilla fish always gets a +c0 vertical boost (~0.295 m/s) when
+ * launched by FishingHook::retrieve, REGARDLESS of dy direction. The P5.5
+ * formula only modeled (kY*dy + kB*sqrt(d)) which gave negative vy when dy<0
+ * (player below fish) — the actual vanilla physics always pushes fish up.
+ * kB is now near 0 (0.005) because the boost is dominated by c0.
  *
- * Result vs vanilla: overall speed err 12.78% (down from 13.69%),
- * vy err 10.78% (down from 13.73%). Long-range (dy>0) vy err ~5%.
- * Short-range (dy<0, dH<0.5) noise from fluid physics — irreducible.
+ * Residual error (8/30 samples with err ~0.04): catches where fish is in deep
+ * water (dy < -0.7) — vanilla Bedrock applies additional fluid drag that we
+ * cannot reproduce from input geometry alone. Would require water-depth sensing.
  */
-const TUNED_KH = 0.1;
-const TUNED_KY = 0.105;
-const TUNED_KB = 0.055;
+const TUNED_KH = 0.108;
+const TUNED_KY = 0.115;
+const TUNED_KB = 0.005;
+/** P6.0: constant upward velocity boost (vanilla always applies ~0.295). */
+const TUNED_C0 = 0.295;
 
 /** P1.2: hookId -> HookTrajectory (samples + derived metrics) */
 const hookTrajectories = new Map();
@@ -455,13 +464,14 @@ export function throwItemToPlayer(item, player) {
   const horizontalDistance = Math.sqrt(dx * dx + dz * dz);
   if (horizontalDistance < 0.01) return;
 
-  // P5.4: engine-derived formula (vanilla FishingHook::retrieve):
-  //   v_x = kH * dx, v_z = kH * dz, v_y = kY * dy + kB * sqrt(d)
-  //   where d = sqrt(dx² + dy² + dz²) (3D distance hook→player)
-  // Constants locked: kH=0.1, kY=0.1, kB=0.08 (Minecraft Legacy source).
+  // P6.0: refined formula with vertical baseline c0.
+  //   v_x = kH * dx
+  //   v_y = kY * dy + kB * sqrt(d) + c0
+  //   v_z = kH * dz
+  //   d = sqrt(dx² + dy² + dz²)
   const dist3D = Math.sqrt(dx * dx + dy * dy + dz * dz);
   const v_x = dx * TUNED_KH;
-  const v_y = dy * TUNED_KY + Math.sqrt(dist3D) * TUNED_KB;
+  const v_y = dy * TUNED_KY + Math.sqrt(dist3D) * TUNED_KB + TUNED_C0;
   const v_z = dz * TUNED_KH;
 
   try { item.clearVelocity(); } catch { /* ignore */ }
@@ -2465,7 +2475,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-01-p5-fine-constants', undefined);
+  log('detector initialized v2026-09-01-p6-c0-baseline', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);
