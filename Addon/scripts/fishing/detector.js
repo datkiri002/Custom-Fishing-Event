@@ -352,20 +352,27 @@ function scheduleHookTrajectory(hookId, t0Speed, sourceSession) {
   };
   if (traj.expectedSamples.length > 0) telemetry.trajectoryExpectedBuilt += 1;
   hookTrajectories.set(hookId, traj);
+  log(`traj scheduled hook=${hookId} expected=${expected.length} hasBefore=${Boolean(before)}`, undefined);
 
   // T1: +1 tick
   try {
     system.runTimeout(() => {
+      log(`traj T1 fire hook=${hookId}`, undefined);
       captureTrajectorySample(hookId, 1);
     }, 1);
-  } catch { /* ignore */ }
+  } catch (e) {
+    log(`traj T1 schedule fail hook=${hookId} err=${e}`, undefined);
+  }
 
   // T2: +2 tick
   try {
     system.runTimeout(() => {
+      log(`traj T2 fire hook=${hookId}`, undefined);
       captureTrajectorySample(hookId, 2);
     }, 2);
-  } catch { /* ignore */ }
+  } catch (e) {
+    log(`traj T2 schedule fail hook=${hookId} err=${e}`, undefined);
+  }
 }
 
 /**
@@ -377,15 +384,22 @@ function scheduleHookTrajectory(hookId, t0Speed, sourceSession) {
  */
 function captureTrajectorySample(hookId, tickOffset) {
   const traj = hookTrajectories.get(hookId);
-  if (!traj) return;
+  if (!traj) {
+    log(`traj sample skip hook=${hookId} T${tickOffset} reason=no_traj`, undefined);
+    return;
+  }
   // Tìm entity — có thể ở dimension nào cũng được
   /** @type {Entity | undefined} */
   let entity;
   try {
     entity = world.getEntity(hookId);
-  } catch { return; }
+  } catch (e) {
+    log(`traj sample skip hook=${hookId} T${tickOffset} reason=getEntity_throw err=${e}`, undefined);
+    return;
+  }
   if (!entity) {
     telemetry.trajectorySamplesDropped += 1;
+    log(`traj sample skip hook=${hookId} T${tickOffset} reason=entity_gone`, undefined);
     return;
   }
   try {
@@ -430,6 +444,13 @@ function captureTrajectorySample(hookId, tickOffset) {
     if (traj.samples.length >= 2) {
       computeTrajectoryMetrics(traj);
     }
+    log(
+      `traj captured hook=${hookId} T${tickOffset} ` +
+      `pos=(${observedLoc.x.toFixed(2)},${observedLoc.y.toFixed(2)},${observedLoc.z.toFixed(2)}) ` +
+      `vel=(${observedVel.x.toFixed(2)},${observedVel.y.toFixed(2)},${observedVel.z.toFixed(2)}) ` +
+      `match=${traj.trajectoryMatchScore}`,
+      undefined
+    );
   } catch { /* ignore */ }
 }
 

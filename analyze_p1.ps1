@@ -134,8 +134,10 @@ foreach ($r in $results) {
 # Trajectory + hook speed + reel from log
 foreach ($line in $lines) {
   if ($line -match '\[fishing\] trajectory sample') { $metrics.trajectorySamples += 1 }
+  if ($line -match '\[fishing\] traj captured hook=') { $metrics.trajectorySamples += 1 }
   if ($line -match '\[fishing\] expected trajectory built') { $metrics.trajectoryExpected += 1 }
   if ($line -match '\[fishing\] trajectory dropped') { $metrics.trajectoryDropped += 1 }
+  if ($line -match '\[fishing\] traj sample skip') { $metrics.trajectoryDropped += 1 }
   if ($line -match '\[fishing\] hook-speed stats n=(\d+) mean=([\d\.]+) std=([\d\.]+) ema=([\d\.]+)') {
     $metrics.hookSpeedSamples = [int]$Matches[1]
     $metrics.hookSpeedMean = [double]$Matches[2]
