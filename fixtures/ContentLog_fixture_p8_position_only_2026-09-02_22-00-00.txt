@@ -1,0 +1,8 @@
+[Scripting][warning]-[fishing] beforeEvents.itemUse subscribed
+[Scripting][warning]-[fishing] detector initialized v2026-09-02-p2-refine
+[Scripting][warning]-[fishing] cast session player=ILwHee sessionId=s1 tick=1000 consistency=100
+[Scripting][warning]-[fishing] hook spawn -100 owner=ILwHee confidence=CONFIRMED associationMethod=DIRECT_CONFIRMED castConfirmed=true score=2000 margin=2000 sT=100 sL=99 sD=100 kR=95 kD=90 kA=99 kS=85 mC=99 mT=88 mE=92 trajMatch=88
+[Scripting][warning]-[fishing] causal chain hook=-100 events=6: cast -> hook_spawn -> hook_active -> reel -> hook_remove -> item_spawn
+[Scripting][warning]-[fishing] match hook=-100 item=minecraft:cod score=1700 count=1/5
+[Scripting][warning]-[fishing] SUCCESS player=ILwHee items=1 primary=missing replaced=true items=1
+[Scripting][warning]-[fishing] telemetry {"totalHooks":1,"confirmed":1,"ambiguous":0,"unknown":0,"fallback":0,"directConfirmed":1,"directAmbiguous":0,"raceFixSynthetic":0,"pendingBeforeEnqueued":1,"pendingBeforeMatched":1,"pendingBeforeExpired":0,"trajectorySamplesTotal":0,"trajectorySamplesDropped":0,"hookSpeedSamples":1,"hookSpeedMean":0.42,"hookSpeedStd":0.05,"hookSpeedEMA":0.41,"itemActiveCandidates":1,"itemActiveMatched":1,"itemActiveUncertain":0,"nullAssignments":0,"causalChainsLogged":1,"reelTotal":1,"reelAssociated":1,"reelUncertain":0,"invariantViolations":0}

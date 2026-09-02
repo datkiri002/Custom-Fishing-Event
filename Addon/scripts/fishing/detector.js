@@ -1184,14 +1184,11 @@ function assessCastHookAssociation(hook, player, session, hookVelocity) {
                   hookVelocity.z * expectedT0.vel.z;
       dirErr = Math.acos(clamp(dot / (obsMag * expMag), -1, 1));
     }
-    // P1.2 fix3: Bedrock hook is bobber (gần như stationary sau spawn).
-    // Vậy position error quan trọng hơn velocity error (hook thật thường có
-    // small bobbing motion ±0.05 m/s). Tăng tolerance cho velocity.
-    const totalErr = posErr + velErr * 0.5 + dirErr * 0.3;
-    const errScore = clamp(
-      100 * (1 - totalErr / (EXPECTED_HOOK_TRAJECTORY_TOLERANCE * 1.5)),
-      0, 100
-    );
+    // P8: Bedrock hook is bobber — position dominates, velocity nearly zero.
+    // T0 sample may capture transient frame. Use position-only score with
+    // wider tolerance (1 block) since hook drifts slightly in water.
+    const posOnly = posErr / EXPECTED_HOOK_TRAJECTORY_TOLERANCE;
+    const errScore = clamp(100 * (1 - posOnly), 0, 100);
     trajectoryMatchScore = Math.round(errScore);
   }
 
