@@ -325,16 +325,21 @@ function findCastSessionForHook(hookId) {
  * Schedule T1, T2 samples cho 1 hook. T0 được capture inline tại spawn.
  * Dùng system.runTimeout để polling — KHÔNG tốn event loop nặng.
  * P1.2: cố gắng build expected trajectory từ BEFORE snapshot nếu đã có.
+ * P1.2 fix: truyền sourceSession trực tiếp — `findCastSessionForHook` không
+ * hoạt động cho synthetic session (boundHookBySessionId không set).
  * @param {string} hookId
  * @param {number} t0Speed
+ * @param {CastSession | undefined} sourceSession  CastSession dùng cho hook
+ *        (complete HOẶC synthetic). Cả 2 đều có `before` nếu race-fix đã chạy.
  */
-function scheduleHookTrajectory(hookId, t0Speed) {
-  const castSession = findCastSessionForHook(hookId);
+function scheduleHookTrajectory(hookId, t0Speed, sourceSession) {
+  const before = sourceSession?.before;
+  const expected = before ? buildExpectedHookTrajectory(before) : [];
   /** @type {HookTrajectory} */
   const traj = {
     hookId,
     samples: [],
-    expectedSamples: castSession?.before ? buildExpectedHookTrajectory(castSession.before) : [],
+    expectedSamples: expected,
     directionStability: 0,
     velocityConsistency: 0,
     acceleration: 0,
@@ -2053,6 +2058,18 @@ function onFishingRodUse(event) {
  */
 function makeSyntheticSession(player, before) {
   const after = captureSnapshot(player);
+  // P1.2 fix: synthetic có AFTER thật (capture tại hook spawn), nên tính
+  // consistency thật từ before↔after drift, không hardcode 50.
+  let playerConsistency = 30;
+  if (before.location && after.location) {
+    const posDelta = distance3D(before.location, after.location);
+    const posScore = clamp(100 * (1 - posDelta / 2.0), 0, 100);
+    const dot = before.viewDirection.x * after.viewDirection.x +
+                before.viewDirection.y * after.viewDirection.y +
+                before.viewDirection.z * after.viewDirection.z;
+    const angScore = clamp(100 * (1 - Math.acos(clamp(dot, -1, 1)) / 0.6), 0, 100);
+    playerConsistency = Math.round((posScore + angScore) / 2);
+  }
   /** @type {CastSession} */
   const session = {
     sessionId: `pending-${before.sequenceId ?? 0}`,
@@ -2063,7 +2080,7 @@ function makeSyntheticSession(player, before) {
     after,
     createdAt: Date.now(),
     expiresAt: Date.now() + CAST_TTL_MS,
-    playerConsistency: 50,
+    playerConsistency,
     synthetic: true,
   };
   return session;
@@ -2239,7 +2256,8 @@ function onEntitySpawn(event) {
     }
 
     // P1.2: schedule hook trajectory samples T1, T2 sau spawn
-    scheduleHookTrajectory(entity.id, hookSpeed);
+    // Truyền castSession (synthetic hoặc complete) để build expected trajectory
+    scheduleHookTrajectory(entity.id, hookSpeed, castSession);
     // P2.3: hook_active ngay khi transition FISHING xong
     recordCausal(entity.id, 'hook_active', { playerId: player.id });
 
