@@ -74,6 +74,19 @@ $currentScenario = -1
 $castIdx = 0
 $hookResults = New-Object System.Collections.ArrayList
 
+# P7: pre-scan traj captured lines -> best match per hook
+$bestTrajMatch = @{}
+$trajRx = [regex]'\[fishing\] traj captured hook=(\S+).*?match=(\d+)'
+foreach ($line in $lines) {
+  $tm = $trajRx.Match($line)
+  if (!$tm.Success) { continue }
+  $hk = $tm.Groups[1].Value
+  $mm = [int]$tm.Groups[2].Value
+  if (-not $bestTrajMatch.ContainsKey($hk) -or $mm -gt $bestTrajMatch[$hk]) {
+    $bestTrajMatch[$hk] = $mm
+  }
+}
+
 foreach ($line in $lines) {
   if ($line -match '\[fishing\] cast session player=') {
     if ($castIdx -lt $truthRows.Count) { $currentScenario = $castIdx }
@@ -85,14 +98,21 @@ foreach ($line in $lines) {
   if (!$m.Success) { continue }
 
   $expected = if ($currentScenario -ge 0) { $truthRows[$currentScenario] } else { $null }
+  $hookId = $m.Groups[1].Value
+  # P7: override trajMatch=0 from T0 with best captured match (T1/T2)
+  $trajMatchReported = if ($line -match 'trajMatch=(\d+)') { [int]$Matches[1] } else { 0 }
+  if ($trajMatchReported -eq 0 -and $bestTrajMatch.ContainsKey($hookId)) {
+    $trajMatchReported = $bestTrajMatch[$hookId]
+  }
   $null = $hookResults.Add([PSCustomObject]@{
-    hookId = $m.Groups[1].Value
+    hookId = $hookId
     owner = $m.Groups[2].Value
     confidence = $m.Groups[3].Value
     method = $m.Groups[4].Value
     castConfirmed = $m.Groups[5].Value
     score = [double]$m.Groups[6].Value
     margin = [double]$m.Groups[7].Value
+    trajMatch = $trajMatchReported
     expected_owner = if ($expected) { $expected.owner_player_id } else { '?' }
     scenario = if ($expected) { $expected.scenario_id } else { 'auto' }
   })
@@ -250,6 +270,7 @@ foreach ($r in $hookResults) {
     actual_conf = $r.confidence
     score = $r.score
     margin = $r.margin
+    trajMatch = $r.trajMatch
     pass = $pass
   })
 }
