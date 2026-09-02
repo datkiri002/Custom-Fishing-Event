@@ -1147,8 +1147,47 @@ function assessCastHookAssociation(hook, player, session, hookVelocity) {
 
   // P1.1: feed trajectoryMatchScore từ hookTrajectories (nếu đã có sample).
   // Trung bình 50 (neutral) khi chưa capture được.
+  // P1.2 fix3: T0 sample inline từ (hookLoc, hookVelocity) so với expected T0.
+  // Vì Bedrock hook gần như stationary sau spawn (bobber), expected V0 nhỏ.
+  let trajectoryMatchScore = 50;
   const traj = hookTrajectories.get(hook.id);
-  const trajectoryMatchScore = traj?.trajectoryMatchScore ?? 50;
+  if (traj && traj.trajectoryMatchScore > 0) {
+    trajectoryMatchScore = traj.trajectoryMatchScore;
+  } else if (before && viewDir) {
+    // Build expected T0 inline (same as buildExpectedHookTrajectory[0])
+    const expectedT0 = {
+      pos: {
+        x: before.headLocation.x + viewDir.x * EXPECTED_HOOK_SPAWN_DIST,
+        y: before.headLocation.y + viewDir.y * EXPECTED_HOOK_SPAWN_DIST,
+        z: before.headLocation.z + viewDir.z * EXPECTED_HOOK_SPAWN_DIST,
+      },
+      vel: {
+        x: viewDir.x * EXPECTED_HOOK_V0,
+        y: viewDir.y * EXPECTED_HOOK_V0,
+        z: viewDir.z * EXPECTED_HOOK_V0,
+      },
+    };
+    const posErr = distance3D(hookLoc, expectedT0.pos);
+    const velErr = distance3D(hookVel, expectedT0.vel);
+    const obsMag = vecMagnitude(hookVel);
+    const expMag = vecMagnitude(expectedT0.vel);
+    let dirErr = 0;
+    if (obsMag > 0.01 && expMag > 0.01) {
+      const dot = hookVel.x * expectedT0.vel.x +
+                  hookVel.y * expectedT0.vel.y +
+                  hookVel.z * expectedT0.vel.z;
+      dirErr = Math.acos(clamp(dot / (obsMag * expMag), -1, 1));
+    }
+    // P1.2 fix3: Bedrock hook is bobber (gần như stationary sau spawn).
+    // Vậy position error quan trọng hơn velocity error (hook thật thường có
+    // small bobbing motion ±0.05 m/s). Tăng tolerance cho velocity.
+    const totalErr = posErr + velErr * 0.5 + dirErr * 0.3;
+    const errScore = clamp(
+      100 * (1 - totalErr / (EXPECTED_HOOK_TRAJECTORY_TOLERANCE * 1.5)),
+      0, 100
+    );
+    trajectoryMatchScore = Math.round(errScore);
+  }
 
   // Player-state consistency: before→after drift + playerConsistency field
   const playerStateScore = session.playerConsistency ?? 30;
@@ -2725,7 +2764,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-02-p1-trajectory-evidence', undefined);
+  log('detector initialized v2026-09-02-p1-t0-inline', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);
