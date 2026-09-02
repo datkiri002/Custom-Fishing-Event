@@ -2773,7 +2773,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-02-p1-dedupe-fix2', undefined);
+  log('detector initialized v2026-09-02-p1-tune-v0', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);

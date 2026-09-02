@@ -52,9 +52,9 @@ export const MODEL_TRAJECTORY_WEIGHT = 200;
 // Hook spawns at player head + viewDir * EXPECTED_HOOK_SPAWN_DIST.
 // Velocity starts at EXPECTED_HOOK_V0, drag 0.98/tick, no gravity (2 tick đầu).
 export const EXPECTED_HOOK_SPAWN_DIST = 1.2;
-export const EXPECTED_HOOK_V0 = 0.6;
+export const EXPECTED_HOOK_V0 = 0.35;  // Bedrock hook thực tế ~0.3-0.4 m/s tại spawn
 export const EXPECTED_HOOK_DRAG = 0.98;
-export const EXPECTED_HOOK_TRAJECTORY_TOLERANCE = 1.0;  // block error cap
+export const EXPECTED_HOOK_TRAJECTORY_TOLERANCE = 1.5;  // tăng từ 1.0 do hook thật dao động
 
 // P1.10: Reel weights (lifetime giảm, distance + session tăng).
 // Tổng 1000.
