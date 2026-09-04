@@ -1125,7 +1125,9 @@ function assessCastHookAssociation(hook, player, session, hookVelocity) {
     const expectedSpeed = telemetryHookSpeedEMA > 0.01
       ? telemetryHookSpeedEMA
       : CAST_HOOK_VEL_EXPECT;
-    hookVelocityScore = clamp(100 * (1 - Math.abs(hookVelMag - expectedSpeed) / (expectedSpeed * 2)), 0, 100);
+    // P11: Bobber hook vel 0.0-0.05 m/s vs CAST_HOOK_VEL_EXPECT=0.3.
+    // Expand tolerance 2x -> 4x để cover initial EMA warmup + transient frames.
+    hookVelocityScore = clamp(100 * (1 - Math.abs(hookVelMag - expectedSpeed) / (expectedSpeed * 4)), 0, 100);
   }
 
   // P1.3: Motion compensation — anchor predicted player @ hook spawn time.
@@ -2806,7 +2808,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-02-p9-rebalance', undefined);
+  log('detector initialized v2026-09-04-p11-tolerance-4x', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);
