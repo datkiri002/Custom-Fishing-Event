@@ -38,15 +38,15 @@ export const WEIGHT_SPATIAL = 250;
 export const CAST_KINEMATIC_WEIGHT = 350;  // ray + direction + angular + speed (gom)
 export const CAST_MODEL_WEIGHT = 300;      // motion compensation + trajectory match
 
-// P1.4: Kinematic sub-weights (tổng 350)
+// P1.4: Kinematic sub-weights (tổng 325)
 export const KINEMATIC_RAY_WEIGHT = 100;
 export const KINEMATIC_DIRECTION_WEIGHT = 100;
 export const KINEMATIC_ANGULAR_WEIGHT = 100;
-export const KINEMATIC_HOOKSPEED_WEIGHT = 50;
+export const KINEMATIC_HOOKSPEED_WEIGHT = 25;  // P9: hook thực tế bobber, speed unreliable
 
-// P1.4: Model sub-weights (tổng 300)
+// P1.4: Model sub-weights (tổng 325) — P9: tăng trajectory weight
 export const MODEL_MOTIONCOMP_WEIGHT = 100;
-export const MODEL_TRAJECTORY_WEIGHT = 200;
+export const MODEL_TRAJECTORY_WEIGHT = 225;
 
 // P1.2: Expected trajectory calibration (Bedrock hook physics).
 // Hook spawns at player head + viewDir * EXPECTED_HOOK_SPAWN_DIST.
