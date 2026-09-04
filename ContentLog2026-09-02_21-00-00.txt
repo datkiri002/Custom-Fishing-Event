@@ -1,0 +1,119 @@
+[Scripting][warning]-[fishing] beforeEvents.itemUse subscribed
+
+[Scripting][warning]-[fishing] detector initialized v2026-09-02-p2-refine
+
+[Scripting][warning]-[fishing] session -12884901886 player=-12884901887 CASTING→FISHING
+
+[Scripting][warning]-[fishing] causal hook=-12884901886 cast {"playerId":"-12884901887","sessionId":"pending-1","sequenceId":1,"synthetic":true,"tick":1167}
+
+[Scripting][warning]-[fishing] causal hook=-12884901886 hook_spawn {"playerId":"-12884901887","confidence":"CONFIRMED","associationMethod":"DIRECT_CONFIRMED","score":1573}
+
+[Scripting][warning]-[fishing] traj scheduled hook=-12884901886 expected=3 hasBefore=true
+
+[Scripting][warning]-[fishing] causal hook=-12884901886 hook_active {"playerId":"-12884901887"}
+
+[Scripting][warning]-[fishing] hook spawn -12884901886 owner=ILwHee confidence=CONFIRMED associationMethod=DIRECT_CONFIRMED castConfirmed=true score=1573 margin=1573 sT=100 sL=82 sD=100 kR=91 kD=86 kA=90 kS=0 mC=87 mT=12 mE=49 trajMatch=0
+
+[Scripting][warning]-[fishing] session -12884901886 player=-12884901887 FISHING→REEL_REQUESTED
+
+[Scripting][warning]-[fishing] causal hook=-12884901886 reel {"playerId":"-12884901887","source":"onFishingRodUse","score":921,"margin":999}
+
+[Scripting][warning]-[fishing] reel associated player=ILwHee hooks=1/1 margin=999
+
+[Scripting][warning]-[fishing] traj T1 fire hook=-12884901886
+
+[Scripting][warning]-[fishing] traj captured hook=-12884901886 T1 pos=(-62.59,62.10,-154.19) vel=(0.09,-0.47,0.83) match=0
+
+[Scripting][warning]-[fishing] traj T2 fire hook=-12884901886
+
+[Scripting][warning]-[fishing] traj captured hook=-12884901886 T2 pos=(-62.44,61.61,-152.82) vel=(0.05,-0.20,0.41) match=0
+
+[Scripting][warning]-[fishing] causal hook=-12884901886 hook_remove {"playerId":"-12884901887","state":"REEL_REQUESTED"}
+
+[Scripting][warning]-[fishing] session -12884901886 player=-12884901887 REEL_REQUESTED→PENDING_RESULT
+
+[Scripting][warning]-[fishing] hook remove -12884901886 player=-12884901887 state=REEL_REQUESTED
+
+[Scripting][warning]-[fishing] item spawn minecraft:salmon id=-12884901885 dim=minecraft:overworld loc={"x":-62.36033248901367,"y":62.605064392089844,"z":-152.11680603027344}
+
+[Scripting][warning]-[fishing] item spawn minecraft:salmon id=-12884901885
+
+[Scripting][warning]-[fishing] item-trajectory minecraft:salmon id=-12884901885 hook=-12884901886 distHook=0.76 vel=(-0.072,0.375,-0.639) speed=0.745 velDir=(-0.10,0.50,-0.86) loc=(-62.36,62.61,-152.12) predictedNext=(-62.43,62.94,-152.74) playerLoc=(-63.03,63.00,-158.05) dPlayer=6.30 dirToPlayer=(-0.11,0.32,-0.94)
+
+[Scripting][warning]-[fishing] causal hook=-12884901886 item_spawn {"itemId":"-12884901885","itemTypeId":"minecraft:salmon","dist":"0.76","postRemove":true}
+
+[Scripting][warning]-[fishing] match hook=-12884901886 item=minecraft:salmon score=1795.6 count=1/5
+
+[Scripting][warning]-[fishing] processCatch player=ILwHee dim=minecraft:overworld hookDim=minecraft:overworld items=1 resolved=1 primaryFound=false ids=-12884901885
+
+[Scripting][warning]-[fishing] SUCCESS player=ILwHee items=1 primary=missing (vanilla auto-pickup) - spawn replacement via beforeCatchSignal
+
+[Scripting][warning]-[fishing] trigger beforeCatchSignal item=minecraft:salmon hookId=-12884901886 subs=1
+
+[Scripting][warning]-[fishing] after beforeCatchSignal trigger item=-12884901881 cancel=false
+
+[Scripting][warning]-[fishing] replacement-trajectory minecraft:diamond type=minecraft:item from=(-62.36,62.61,-152.12) to=(-63.03,63.00,-158.05) dH=5.97 dy=0.39 velBefore=(0.076,0.200,0.077) impulse=(-0.072,0.353,-0.641) speed=0.735
+
+[Scripting][warning]-[fishing] SUCCESS player=ILwHee primary=missing replaced=true items=1
+
+[Scripting][warning]-[fishing] cast session player=ILwHee sessionId=s1 tick=1377 consistency=100
+
+[Scripting][warning]-[fishing] causal chain hook=-12884901886 events=6: cast -> hook_spawn -> hook_active -> reel -> hook_remove -> item_spawn
+
+[Scripting][warning]-[fishing] session -12884901880 player=-12884901887 CASTING→FISHING
+
+[Scripting][warning]-[fishing] causal hook=-12884901880 cast {"playerId":"-12884901887","sessionId":"pending-3","sequenceId":3,"synthetic":true,"tick":1486}
+
+[Scripting][warning]-[fishing] causal hook=-12884901880 hook_spawn {"playerId":"-12884901887","confidence":"CONFIRMED","associationMethod":"DIRECT_CONFIRMED","score":1815}
+
+[Scripting][warning]-[fishing] traj scheduled hook=-12884901880 expected=3 hasBefore=true
+
+[Scripting][warning]-[fishing] causal hook=-12884901880 hook_active {"playerId":"-12884901887"}
+
+[Scripting][warning]-[fishing] hook spawn -12884901880 owner=ILwHee confidence=CONFIRMED associationMethod=DIRECT_CONFIRMED castConfirmed=true score=1815 margin=1815 sT=100 sL=84 sD=100 kR=97 kD=95 kA=92 kS=99 mC=87 mT=13 mE=50 trajMatch=0
+
+[Scripting][warning]-[fishing] session -12884901880 player=-12884901887 FISHING→REEL_REQUESTED
+
+[Scripting][warning]-[fishing] causal hook=-12884901880 reel {"playerId":"-12884901887","source":"onFishingRodUse","score":925,"margin":999}
+
+[Scripting][warning]-[fishing] reel associated player=ILwHee hooks=1/1 margin=999
+
+[Scripting][warning]-[fishing] traj T1 fire hook=-12884901880
+
+[Scripting][warning]-[fishing] traj captured hook=-12884901880 T1 pos=(-62.33,72.22,-154.76) vel=(0.16,-0.93,0.74) match=0
+
+[Scripting][warning]-[fishing] traj T2 fire hook=-12884901880
+
+[Scripting][warning]-[fishing] traj captured hook=-12884901880 T2 pos=(-62.04,70.43,-153.39) vel=(0.14,-0.93,0.68) match=0
+
+[Scripting][warning]-[fishing] causal hook=-12884901880 hook_remove {"playerId":"-12884901887","state":"REEL_REQUESTED"}
+
+[Scripting][warning]-[fishing] session -12884901880 player=-12884901887 REEL_REQUESTED→PENDING_RESULT
+
+[Scripting][warning]-[fishing] hook remove -12884901880 player=-12884901887 state=REEL_REQUESTED
+
+[Scripting][warning]-[fishing] item spawn minecraft:cod id=-12884901879 dim=minecraft:overworld loc={"x":-60.87859344482422,"y":64.17073059082031,"z":-147.9075469970703}
+
+[Scripting][warning]-[fishing] item spawn minecraft:cod id=-12884901879
+
+[Scripting][warning]-[fishing] item-trajectory minecraft:cod id=-12884901879 hook=-12884901880 distHook=1.88 vel=(-0.234,1.454,-1.105) speed=1.841 velDir=(-0.13,0.79,-0.60) loc=(-60.88,64.17,-147.91) predictedNext=(-61.11,65.58,-148.99) playerLoc=(-63.03,74.45,-158.05) dPlayer=15.77 dirToPlayer=(-0.14,0.75,-0.64)
+
+[Scripting][warning]-[fishing] causal hook=-12884901880 item_spawn {"itemId":"-12884901879","itemTypeId":"minecraft:cod","dist":"1.88","postRemove":true}
+
+[Scripting][warning]-[fishing] match hook=-12884901880 item=minecraft:cod score=1748.4 count=1/5
+
+[Scripting][warning]-[fishing] processCatch player=ILwHee dim=minecraft:overworld hookDim=minecraft:overworld items=1 resolved=1 primaryFound=false ids=-12884901879
+
+[Scripting][warning]-[fishing] SUCCESS player=ILwHee items=1 primary=missing (vanilla auto-pickup) - spawn replacement via beforeCatchSignal
+
+[Scripting][warning]-[fishing] trigger beforeCatchSignal item=minecraft:cod hookId=-12884901880 subs=1
+
+[Scripting][warning]-[fishing] after beforeCatchSignal trigger item=-12884901875 cancel=false
+
+[Scripting][warning]-[fishing] replacement-trajectory minecraft:diamond type=minecraft:item from=(-60.88,64.17,-147.91) to=(-63.03,74.45,-158.05) dH=10.37 dy=10.27 velBefore=(-0.033,0.200,0.090) impulse=(-0.232,1.496,-1.096) speed=1.869
+
+[Scripting][warning]-[fishing] SUCCESS player=ILwHee primary=missing replaced=true items=1
+
+[Scripting][warning]-[fishing] cast session player=ILwHee sessionId=s2 tick=1602 consistency=100
+
+[Scripting][warning]-[fishing] causal chain hook=-12884901880 events=6: cast -> hook_spawn -> hook_active -> reel -> hook_remove -> item_spawn

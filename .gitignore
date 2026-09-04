@@ -1,7 +1,6 @@
-bedrock-mcp/
-mineflayer-runtime-verification/
-prismarine-web-client-master/
-*.zip
+ContentLog*.txt
+fixtures/ContentLog*.txt
+p1_log_partial.txt
+p1_metrics.txt
+p3_results/
 *.log
-*.tmp
-"Xác định chủ nhân hook nâng cấp.txt"

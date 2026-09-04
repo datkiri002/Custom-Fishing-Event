@@ -142,17 +142,38 @@
  */
 
 /**
- * Evidence breakdown cho 1 Cast → Hook hypothesis. Mỗi group 0-100,
- * total = sum(group * weight) / 1000.
+ * Evidence breakdown cho 1 Cast → Hook hypothesis. P1.4: chia thành 3 group
+ * để tránh double-count giữa viewDir/hookVel/hookLoc.
  * @typedef {Object} EvidenceBreakdown
- * @property {number} temporal             Cast time → hook spawn tick proximity
- * @property {number} spatial              Cast location → hook location distance
- * @property {number} rayProjection        Perpendicular error từ ray view→hook
- * @property {number} angular              Angle giữa viewDirection và hookVelocity
- * @property {number} hookVelocity         Hook bay xa (magnitude kỳ vọng)
- * @property {number} playerMomentum       Player đứng yên khi cast
- * @property {number} beforeAfterConsistency |player@spawn - player@beforeUse| drift
+ * @property {SpatialGroup} spatial        Location + drift (temporal, location, before/after drift)
+ * @property {KinematicGroup} kinematic    Ray + direction + angular + speed fit
+ * @property {ModelEvidence} model         Motion compensation + trajectory match
  * @property {number} total                Tổng weighted (0-1000)
+ */
+
+/**
+ * Spatial evidence: thời gian + vị trí + player state drift.
+ * @typedef {Object} SpatialGroup
+ * @property {number} temporal             Cast time → hook spawn tick proximity (0-100)
+ * @property {number} location             Cast location → hook location distance (0-100)
+ * @property {number} beforeAfterDrift     Player state consistency (BEFORE→AFTER)
+ */
+
+/**
+ * Kinematic evidence: ray + direction + angular + speed distribution fit.
+ * @typedef {Object} KinematicGroup
+ * @property {number} rayProjection        viewDir → hook ray perpendicular (0-100)
+ * @property {number} directionError       viewDir → hook vector angle (0-100)
+ * @property {number} angularAlignment     viewDir ↔ hookVelocity angle (0-100)
+ * @property {number} hookSpeedFit         hookVelMag fit to expected distribution (0-100)
+ */
+
+/**
+ * Model evidence: composite scoring từ physics model.
+ * @typedef {Object} ModelEvidence
+ * @property {number} motionCompensation   Predicted player@hookspawn vs hookLoc (0-100)
+ * @property {number} trajectoryMatch      HookTrajectory.trajectoryMatchScore (0-100)
+ * @property {number} expectedTrajectory   Composite (motion + trajectory) (0-100)
  */
 
 /**
@@ -190,11 +211,23 @@
  * @typedef {Object} HookTrajectory
  * @property {string} hookId
  * @property {HookTrajectorySample[]} samples
+ * @property {ExpectedHookSample[]} expectedSamples  P1.2: model-derived expected trajectory
  * @property {number} directionStability    0-100, std của direction vectors
  * @property {number} velocityConsistency   0-100, std của |velocity|
  * @property {number} acceleration          approx Δvelocity/Δtick
  * @property {number} trajectoryDeviation   deviation so với expected cast trajectory
  * @property {number} expectedError         kinematic fit vs Before snapshot
+ * @property {number} expectedPositionError  mean |observedPos - expectedPos| (block)
+ * @property {number} expectedVelocityError  mean |observedVel - expectedVel| (m/s)
+ * @property {number} expectedDirectionError mean angle (radian) between observed & expected vel
+ * @property {number} trajectoryMatchScore  0-100, fit-to-model composite
+ */
+
+/**
+ * @typedef {Object} ExpectedHookSample
+ * @property {number} tick                  predicted tick (before.tick + offset)
+ * @property {Vector3} expectedPos           predicted position (block)
+ * @property {Vector3} expectedVel           predicted velocity (m/s)
  */
 
 /**

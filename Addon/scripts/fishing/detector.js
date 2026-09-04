@@ -10,6 +10,12 @@
 //   -> minecraft:item spawn
 //   -> Correlation Engine
 //   -> FishingCatchEvent
+//
+// P2.3: Causal chain format
+//   Log: `causal chain hook={id} events=N: {e1} → {e2} → ...`
+//   Events: cast, hook_spawn, hook_active, reel, hook_remove, item_spawn
+//   Recorded in causalChains Map<hookId, chainEvents[]>. Final log fires on
+//   hook_remove. ca]usalChains cleanup after 30s (defensive).
 
 import { world, system } from '@minecraft/server';
 import {
@@ -41,9 +47,22 @@ import {
   WEIGHT_TEMPORAL,
   WEIGHT_SPATIAL,
   CAST_KINEMATIC_WEIGHT,
-  WEIGHT_HOOK_VELOCITY,
-  CAST_PREDICTION_WEIGHT,
-  CAST_EXPECTED_WEIGHT,
+  CAST_MODEL_WEIGHT,
+  KINEMATIC_RAY_WEIGHT,
+  KINEMATIC_DIRECTION_WEIGHT,
+  KINEMATIC_ANGULAR_WEIGHT,
+  KINEMATIC_HOOKSPEED_WEIGHT,
+  MODEL_MOTIONCOMP_WEIGHT,
+  MODEL_TRAJECTORY_WEIGHT,
+  EXPECTED_HOOK_SPAWN_DIST,
+  EXPECTED_HOOK_V0,
+  EXPECTED_HOOK_DRAG,
+  EXPECTED_HOOK_TRAJECTORY_TOLERANCE,
+  REEL_WEIGHT_DISTANCE,
+  REEL_WEIGHT_SESSION,
+  REEL_WEIGHT_STATE,
+  REEL_WEIGHT_LIFETIME,
+  REEL_WEIGHT_SEQUENCE,
   CAST_RAY_MAX_PERPENDICULAR,
   CAST_HOOK_VEL_MIN,
   CAST_HOOK_VEL_EXPECT,
@@ -167,40 +186,61 @@ const telemetry = {
   // hook trajectory (P1.2)
   trajectorySamplesTotal: 0,  // tổng sample đã capture
   trajectorySamplesDropped: 0,  // hook bị remove trước khi capture đủ
-  // P1.4: hook speed calibration (EMA)
+  trajectoryExpectedBuilt: 0,  // hook có expected trajectory built từ BEFORE
+  // P1.5: hook speed calibration (EMA + Welford)
   hookSpeedSamples: 0,
+  // P1.9: reel association
+  reelTotal: 0,           // tổng Rod use khi có active hook
+  reelAssociated: 0,      // margin OK, đã gắn hook
+  reelUncertain: 0,       // margin thấp, không gắn
+  reelMarginSum: 0,       // running sum margin
   // P2.1: item active correlation
-  itemActiveCandidates: 0,    // tổng item candidate đã consider
-  itemActiveMatched: 0,      // early-bound (Stage 2 ready)
-  itemActiveUncertain: 0,    // margin thấp → không bind
+  itemActiveCandidates: 0,
+  itemActiveMatched: 0,
+  itemActiveUncertain: 0,
   // P2.4: NULL assignment
   nullAssignments: 0,
 };
 
-/** P1.4: runtime calibration của hook speed. EMA (alpha=0.1). Update từ
- * CONFIRMED hooks. Nếu chưa có sample → dùng CAST_HOOK_VEL_EXPECT. */
+/** P1.5: runtime calibration của hook speed. EMA (alpha=0.1) cho smoothing,
+ * Welford cho running mean+std (fit-to-distribution scoring).
+ * Update từ CONFIRMED hooks only. Nếu chưa đủ samples → fallback về
+ * CAST_HOOK_VEL_EXPECT. */
 let telemetryHookSpeedEMA = 0;
+let telemetryHookSpeedMean = 0;
+let telemetryHookSpeedM2 = 0;
+let telemetryHookSpeedStd = 0;
 const HOOK_SPEED_EMA_ALPHA = 0.1;
+const HOOK_SPEED_FIT_MIN_SAMPLES = 5;
 
 /**
- * P5.5: Engine-derived constants tuned from 30 in-game samples.
- * Formula: v_x = kH*dx, v_y = kY*dy + kB*sqrt(d), v_z = kH*dz
- *   where d = sqrt(dx² + dy² + dz²) (3D distance hook→player).
+ * P6.0: Refined constants from 30-sample vector-error analysis (analyze_vec.ps1).
+ *   formula: v_x = kH * dx
+ *            v_y = kY * dy + kB * sqrt(d) + c0
+ *            v_z = kH * dz
+ *   where d = sqrt(dx² + dy² + dz²).
  *
- * Base values from Minecraft Legacy FishingHook::retrieve source:
- *   kH=0.1, kY=0.1, kB=0.08.
+ * Per-component MAE on 30 samples:
+ *   vx:  0.0009
+ *   vy:  0.0151
+ *   vz:  0.0012
+ *   |V|: 0.0157  (down from 0.2251 with P5.5 fine constants — 93% reduction)
  *
- * P5.5 fine-tune on 30 samples: kB=0.055 (lower than 0.08 because diamond
- * has velBefore y=0.2 already, kB*sqrt(d) double-counts baseline). kY=0.105
- * accounts for slight under-prediction at long range (dy>0).
+ * Key insight: vanilla fish always gets a +c0 vertical boost (~0.295 m/s) when
+ * launched by FishingHook::retrieve, REGARDLESS of dy direction. The P5.5
+ * formula only modeled (kY*dy + kB*sqrt(d)) which gave negative vy when dy<0
+ * (player below fish) — the actual vanilla physics always pushes fish up.
+ * kB is now near 0 (0.005) because the boost is dominated by c0.
  *
- * Result vs vanilla: overall speed err 12.78% (down from 13.69%),
- * vy err 10.78% (down from 13.73%). Long-range (dy>0) vy err ~5%.
- * Short-range (dy<0, dH<0.5) noise from fluid physics — irreducible.
+ * Residual error (8/30 samples with err ~0.04): catches where fish is in deep
+ * water (dy < -0.7) — vanilla Bedrock applies additional fluid drag that we
+ * cannot reproduce from input geometry alone. Would require water-depth sensing.
  */
-const TUNED_KH = 0.1;
-const TUNED_KY = 0.105;
-const TUNED_KB = 0.055;
+const TUNED_KH = 0.108;
+const TUNED_KY = 0.115;
+const TUNED_KB = 0.005;
+/** P6.0: constant upward velocity boost (vanilla always applies ~0.295). */
+const TUNED_C0 = 0.295;
 
 /** P1.2: hookId -> HookTrajectory (samples + derived metrics) */
 const hookTrajectories = new Map();
@@ -240,69 +280,183 @@ function recordCausal(hookId, event, data) {
 }
 
 /**
+ * P1.2: build expected hook trajectory từ BEFORE snapshot. Approximation
+ * cho Bedrock hook physics 2-3 tick đầu (trước splash, drag 0.98/tick, no
+ * gravity). Used để so sánh observed vs model → trajectoryMatchScore.
+ * @param {CastSnapshot} before
+ * @returns {ExpectedHookSample[]}
+ */
+function buildExpectedHookTrajectory(before) {
+  /** @type {ExpectedHookSample[]} */
+  const samples = [];
+  const anchor = before.headLocation;
+  const vDir = before.viewDirection;
+  let pos = {
+    x: anchor.x + vDir.x * EXPECTED_HOOK_SPAWN_DIST,
+    y: anchor.y + vDir.y * EXPECTED_HOOK_SPAWN_DIST,
+    z: anchor.z + vDir.z * EXPECTED_HOOK_SPAWN_DIST,
+  };
+  let vel = {
+    x: vDir.x * EXPECTED_HOOK_V0,
+    y: vDir.y * EXPECTED_HOOK_V0,
+    z: vDir.z * EXPECTED_HOOK_V0,
+  };
+  // 3 samples: T0, T1, T2
+  for (let i = 0; i < 3; i++) {
+    samples.push({ tick: before.tick + i, expectedPos: cloneVector(pos), expectedVel: cloneVector(vel) });
+    pos = { x: pos.x + vel.x, y: pos.y + vel.y, z: pos.z + vel.z };
+    vel = {
+      x: vel.x * EXPECTED_HOOK_DRAG,
+      y: vel.y * EXPECTED_HOOK_DRAG,
+      z: vel.z * EXPECTED_HOOK_DRAG,
+    };
+  }
+  return samples;
+}
+
+/**
+ * P1.2: tìm CastSession bound với hookId (qua boundHookBySessionId). Trả về
+ * session thật (complete) hoặc undefined nếu chưa tìm được.
+ * @param {string} hookId
+ * @returns {CastSession | undefined}
+ */
+function findCastSessionForHook(hookId) {
+  for (const [sessionId, hid] of boundHookBySessionId) {
+    if (hid === hookId) return castSessionsById.get(sessionId);
+  }
+  return undefined;
+}
+
+/**
  * Schedule T1, T2 samples cho 1 hook. T0 được capture inline tại spawn.
  * Dùng system.runTimeout để polling — KHÔNG tốn event loop nặng.
+ * P1.2: cố gắng build expected trajectory từ BEFORE snapshot nếu đã có.
+ * P1.2 fix: truyền sourceSession trực tiếp — `findCastSessionForHook` không
+ * hoạt động cho synthetic session (boundHookBySessionId không set).
  * @param {string} hookId
  * @param {number} t0Speed
+ * @param {CastSession | undefined} sourceSession  CastSession dùng cho hook
+ *        (complete HOẶC synthetic). Cả 2 đều có `before` nếu race-fix đã chạy.
  */
-function scheduleHookTrajectory(hookId, t0Speed) {
+function scheduleHookTrajectory(hookId, t0Speed, sourceSession) {
+  const before = sourceSession?.before;
+  const expected = before ? buildExpectedHookTrajectory(before) : [];
   /** @type {HookTrajectory} */
   const traj = {
     hookId,
     samples: [],
+    expectedSamples: expected,
     directionStability: 0,
     velocityConsistency: 0,
     acceleration: 0,
     trajectoryDeviation: 0,
     expectedError: 0,
+    expectedPositionError: 0,
+    expectedVelocityError: 0,
+    expectedDirectionError: 0,
+    trajectoryMatchScore: 0,
   };
+  if (traj.expectedSamples.length > 0) telemetry.trajectoryExpectedBuilt += 1;
   hookTrajectories.set(hookId, traj);
+  log(`traj scheduled hook=${hookId} expected=${expected.length} hasBefore=${Boolean(before)}`, undefined);
 
   // T1: +1 tick
   try {
     system.runTimeout(() => {
+      log(`traj T1 fire hook=${hookId}`, undefined);
       captureTrajectorySample(hookId, 1);
     }, 1);
-  } catch { /* ignore */ }
+  } catch (e) {
+    log(`traj T1 schedule fail hook=${hookId} err=${e}`, undefined);
+  }
 
   // T2: +2 tick
   try {
     system.runTimeout(() => {
+      log(`traj T2 fire hook=${hookId}`, undefined);
       captureTrajectorySample(hookId, 2);
     }, 2);
-  } catch { /* ignore */ }
+  } catch (e) {
+    log(`traj T2 schedule fail hook=${hookId} err=${e}`, undefined);
+  }
 }
 
 /**
  * Capture 1 sample cho hook trajectory. Nếu hook không còn tồn tại → skip
- * (không phải lỗi, hook có thể bị remove sớm).
+ * (không phải lỗi, hook có thể bị remove sớm). P1.2: tính expected vs
+ * observed fit → trajectoryMatchScore.
  * @param {string} hookId
  * @param {number} tickOffset  1 hoặc 2 (T1 hoặc T2)
  */
 function captureTrajectorySample(hookId, tickOffset) {
   const traj = hookTrajectories.get(hookId);
-  if (!traj) return;
+  if (!traj) {
+    log(`traj sample skip hook=${hookId} T${tickOffset} reason=no_traj`, undefined);
+    return;
+  }
   // Tìm entity — có thể ở dimension nào cũng được
   /** @type {Entity | undefined} */
   let entity;
   try {
     entity = world.getEntity(hookId);
-  } catch { return; }
+  } catch (e) {
+    log(`traj sample skip hook=${hookId} T${tickOffset} reason=getEntity_throw err=${e}`, undefined);
+    return;
+  }
   if (!entity) {
     telemetry.trajectorySamplesDropped += 1;
+    log(`traj sample skip hook=${hookId} T${tickOffset} reason=entity_gone`, undefined);
     return;
   }
   try {
+    const observedLoc = cloneVector(entity.location);
+    const observedVel = safeGetVelocity(entity);
     traj.samples.push({
       tick: system.currentTick,
       time: Date.now(),
-      location: cloneVector(entity.location),
-      velocity: safeGetVelocity(entity),
+      location: observedLoc,
+      velocity: observedVel,
     });
     telemetry.trajectorySamplesTotal += 1;
+
+    // P1.2: so với expected. tickOffset 1 → expectedSamples[1], etc.
+    if (traj.expectedSamples.length > tickOffset) {
+      const expected = traj.expectedSamples[tickOffset];
+      const posErr = distance3D(observedLoc, expected.expectedPos);
+      const velErr = distance3D(observedVel, expected.expectedVel);
+      // Running mean
+      const n = tickOffset;
+      traj.expectedPositionError = (traj.expectedPositionError * (n - 1) + posErr) / n;
+      traj.expectedVelocityError = (traj.expectedVelocityError * (n - 1) + velErr) / n;
+      // Direction error
+      const obsMag = vecMagnitude(observedVel);
+      const expMag = vecMagnitude(expected.expectedVel);
+      if (obsMag > 0.01 && expMag > 0.01) {
+        const dot = observedVel.x * expected.expectedVel.x +
+                    observedVel.y * expected.expectedVel.y +
+                    observedVel.z * expected.expectedVel.z;
+        const angle = Math.acos(clamp(dot / (obsMag * expMag), -1, 1));
+        traj.expectedDirectionError = (traj.expectedDirectionError * (n - 1) + angle) / n;
+      }
+      // trajectoryMatchScore: 100 nếu pos+vel error thấp
+      const totalErr = posErr + velErr;
+      const errScore = clamp(
+        100 * (1 - totalErr / (EXPECTED_HOOK_TRAJECTORY_TOLERANCE * 2)),
+        0, 100
+      );
+      traj.trajectoryMatchScore = Math.round(errScore);
+    }
+
     if (traj.samples.length >= 2) {
       computeTrajectoryMetrics(traj);
     }
+    log(
+      `traj captured hook=${hookId} T${tickOffset} ` +
+      `pos=(${observedLoc.x.toFixed(2)},${observedLoc.y.toFixed(2)},${observedLoc.z.toFixed(2)}) ` +
+      `vel=(${observedVel.x.toFixed(2)},${observedVel.y.toFixed(2)},${observedVel.z.toFixed(2)}) ` +
+      `match=${traj.trajectoryMatchScore}`,
+      undefined
+    );
   } catch { /* ignore */ }
 }
 
@@ -455,13 +609,14 @@ export function throwItemToPlayer(item, player) {
   const horizontalDistance = Math.sqrt(dx * dx + dz * dz);
   if (horizontalDistance < 0.01) return;
 
-  // P5.4: engine-derived formula (vanilla FishingHook::retrieve):
-  //   v_x = kH * dx, v_z = kH * dz, v_y = kY * dy + kB * sqrt(d)
-  //   where d = sqrt(dx² + dy² + dz²) (3D distance hook→player)
-  // Constants locked: kH=0.1, kY=0.1, kB=0.08 (Minecraft Legacy source).
+  // P6.0: refined formula with vertical baseline c0.
+  //   v_x = kH * dx
+  //   v_y = kY * dy + kB * sqrt(d) + c0
+  //   v_z = kH * dz
+  //   d = sqrt(dx² + dy² + dz²)
   const dist3D = Math.sqrt(dx * dx + dy * dy + dz * dz);
   const v_x = dx * TUNED_KH;
-  const v_y = dy * TUNED_KY + Math.sqrt(dist3D) * TUNED_KB;
+  const v_y = dy * TUNED_KY + Math.sqrt(dist3D) * TUNED_KB + TUNED_C0;
   const v_z = dz * TUNED_KH;
 
   try { item.clearVelocity(); } catch { /* ignore */ }
@@ -517,9 +672,8 @@ function getActiveHookSessionsForPlayer(playerId) {
 }
 
 /**
- * P1.6: score Reel candidate ↔ Active hook.
- * Dimensions: temporal proximity (Rod use → hook lifetime), player-to-hook
- * distance, hook state, session consistency, sequence match.
+ * P1.10: score Reel candidate ↔ Active hook. Distance + session consistency
+ * chiếm ưu thế (750/1000), lifetime + sequence chỉ là weak (100/1000).
  * @param {Player} player
  * @param {FishingSession} activeSession
  * @param {Vector3} reelLocation   player location tại reel moment
@@ -529,35 +683,39 @@ function getActiveHookSessionsForPlayer(playerId) {
 function scoreReelCandidate(player, activeSession, reelLocation, reelTick) {
   let score = 0;
 
-  // Player-to-hook distance (300)
+  // P1.10: distance (400) — ưu tiên cao nhất
   const hookLoc = activeSession.hookLocation;
   const d = distance3D(reelLocation, hookLoc);
   const dScore = clamp(100 * (1 - d / FALLBACK_OWNER_MAX_DISTANCE), 0, 100);
-  score += dScore * 3;
+  score += dScore * (REEL_WEIGHT_DISTANCE / 100);
 
-  // Temporal: hook lifetime tính đến reel moment (200)
-  // Hook càng lâu + reel trùng → tốt (hook đã "chín")
-  const lifetime = reelTick - activeSession.hookSpawnTick;
-  const lifetimeScore = clamp(100 * Math.min(1, lifetime / 20), 0, 100);
-  score += lifetimeScore * 2;
-
-  // Session consistency (200)
-  // DIRECT_CONFIRMED > DIRECT_AMBIGUOUS > FALLBACK > UNKNOWN
+  // Session consistency (350) — owner confidence + hook state
   const conf = activeSession.associationMethod;
   const confScore =
     conf === 'DIRECT_CONFIRMED' ? 100 :
     conf === 'DIRECT_AMBIGUOUS' ? 60 :
     conf === 'TENTATIVE' ? 40 :
     conf === 'FALLBACK' ? 30 : 20;
-  score += confScore * 2;
+  // Conf chiếm 2/3, state chiếm 1/3 trong session group
+  score += confScore * (REEL_WEIGHT_SESSION / 100) * 0.67;
 
-  // Cast exclusivity bonus: nếu session CHƯA được reel-ed (100)
-  const stateScore = activeSession.state === 'FISHING' ? 100 : 50;
-  score += stateScore;
+  // State bonus (150) — FISHING = ready, INVENTORY = ready, REEL_REQUESTED = mid-reel
+  const stateScore = activeSession.state === 'FISHING' ? 100 :
+                     activeSession.state === 'INVENTORY_CHANGED' ? 80 :
+                     activeSession.state === 'REEL_REQUESTED' ? 50 : 30;
+  score += stateScore * (REEL_WEIGHT_STATE / 100);
 
-  // Sequence match bonus (200): nếu session còn mới so với reel tick
+  // Lifetime (50) — weak evidence
+  const lifetime = reelTick - activeSession.hookSpawnTick;
+  const lifetimeScore = clamp(100 * Math.min(1, lifetime / 20), 0, 100);
+  score += lifetimeScore * (REEL_WEIGHT_LIFETIME / 100);
+
+  // Sequence match (50) — session mới = tốt
   const ageScore = clamp(100 * (1 - lifetime / 100), 0, 100);
-  score += ageScore * 2;
+  score += ageScore * (REEL_WEIGHT_SEQUENCE / 100);
+
+  // Conf bù vào 1/3 còn lại của session group
+  score += confScore * (REEL_WEIGHT_SESSION / 100) * 0.33;
 
   return Math.round(score);
 }
@@ -953,37 +1111,88 @@ function assessCastHookAssociation(hook, player, session, hookVelocity) {
     }
   }
 
-  // Hook velocity magnitude: dùng calibration từ telemetry runtime
-  // (P1.4 — telemetryHookSpeedEMA). Nếu chưa có calibration dùng
-  // CAST_HOOK_VEL_EXPECT làm default. Score dựa trên fit-to-distribution,
-  // KHÔNG phải magnitude thuần.
-  const expectedSpeed = telemetryHookSpeedEMA > 0.01
-    ? telemetryHookSpeedEMA
-    : CAST_HOOK_VEL_EXPECT;
-  // P1.4: hook speed cao hơn expected KHÔNG đồng nghĩa score cao hơn.
-  // Chỉ đo "fit với distribution expected" (gần expected = tốt, quá xa = kém).
-  const speedDelta = Math.abs(hookVelMag - expectedSpeed);
-  const hookVelocityScore = clamp(100 * (1 - speedDelta / (expectedSpeed * 2)), 0, 100);
-
-  // P1.1: Motion compensation. KHÔNG coi player moving là negative evidence.
-  // Dùng P0 + V0*Δt để predict player location khi hook spawn, so với hookSpawn.
-  // Nếu prediction fit → strong positive (Player chạy vẫn có thể là owner).
-  const playerVel = before?.velocity ?? after?.velocity;
-  const playerSpeed = vecMagnitude(/** @type {Vector3} */ (playerVel));
-  let predictionErrorScore = 50;  // neutral khi không tính được
-  if (playerVel && castLoc && (castTick !== undefined)) {
-    const deltaTicks = Math.max(0, system.currentTick - castTick);
-    const predictedLoc = {
-      x: castLoc.x + playerVel.x * deltaTicks,
-      y: castLoc.y + playerVel.y * deltaTicks,
-      z: castLoc.z + playerVel.z * deltaTicks,
-    };
-    const predictedError = distance3D(predictedLoc, hookLoc);
-    // Error càng nhỏ → score càng cao. Cùng ngưỡng CAST_TO_HOOK_DISTANCE.
-    predictionErrorScore = clamp(100 * (1 - predictedError / CAST_TO_HOOK_DISTANCE), 0, 100);
+  // P1.5: hook speed fit-to-distribution. 100 nếu nằm trong [μ-σ, μ+σ],
+  // 50 nếu [μ-2σ, μ+2σ], 0 ngoài. Fallback về fit-to-expected nếu < 5 samples.
+  let hookVelocityScore;
+  if (telemetry.hookSpeedSamples >= HOOK_SPEED_FIT_MIN_SAMPLES && telemetryHookSpeedStd > 0.01) {
+    const mu = telemetryHookSpeedMean;
+    const sigma = telemetryHookSpeedStd;
+    const dev = Math.abs(hookVelMag - mu);
+    if (dev <= sigma) hookVelocityScore = 100;
+    else if (dev <= 2 * sigma) hookVelocityScore = 50;
+    else hookVelocityScore = 0;
+  } else {
+    const expectedSpeed = telemetryHookSpeedEMA > 0.01
+      ? telemetryHookSpeedEMA
+      : CAST_HOOK_VEL_EXPECT;
+    // P11: Bobber hook vel 0.0-0.05 m/s vs CAST_HOOK_VEL_EXPECT=0.3.
+    // Expand tolerance 2x -> 4x để cover initial EMA warmup + transient frames.
+    hookVelocityScore = clamp(100 * (1 - Math.abs(hookVelMag - expectedSpeed) / (expectedSpeed * 4)), 0, 100);
   }
-  // Nếu player đứng yên (playerSpeed ≈ 0) thì predicted = castLoc, error =
-  // distance. Vẫn score đúng (không penalty, chỉ là special case).
+
+  // P1.3: Motion compensation — anchor predicted player @ hook spawn time.
+  // KHÔNG coi player moving là negative evidence. Dùng BEFORE snapshot
+  // (P0, V0, D0) + Δt → predict player @ system.currentTick. Sau đó build
+  // expected hook spawn = predictedPlayer + viewDir * EXPECTED_HOOK_SPAWN_DIST.
+  // So expectedHookSpawn vs actual hookLoc → motionComp score.
+  const playerVel = before?.velocity ?? after?.velocity;
+  let motionCompScore = 50;  // neutral
+  if (before && playerVel && viewDir) {
+    const deltaTicks = Math.max(0, system.currentTick - before.tick);
+    const predictedPlayerLoc = {
+      x: before.location.x + playerVel.x * deltaTicks,
+      y: before.location.y + playerVel.y * deltaTicks,
+      z: before.location.z + playerVel.z * deltaTicks,
+    };
+    const expectedHookSpawn = {
+      x: predictedPlayerLoc.x + viewDir.x * EXPECTED_HOOK_SPAWN_DIST,
+      y: predictedPlayerLoc.y + viewDir.y * EXPECTED_HOOK_SPAWN_DIST + 1.6,  // head offset
+      z: predictedPlayerLoc.z + viewDir.z * EXPECTED_HOOK_SPAWN_DIST,
+    };
+    const motionErr = distance3D(expectedHookSpawn, hookLoc);
+    motionCompScore = clamp(100 * (1 - motionErr / CAST_TO_HOOK_DISTANCE), 0, 100);
+  }
+
+  // P1.1: feed trajectoryMatchScore từ hookTrajectories (nếu đã có sample).
+  // Trung bình 50 (neutral) khi chưa capture được.
+  // P1.2 fix3: T0 sample inline từ (hookLoc, hookVelocity) so với expected T0.
+  // Vì Bedrock hook gần như stationary sau spawn (bobber), expected V0 nhỏ.
+  let trajectoryMatchScore = 50;
+  const traj = hookTrajectories.get(hook.id);
+  if (traj && traj.trajectoryMatchScore > 0) {
+    trajectoryMatchScore = traj.trajectoryMatchScore;
+  } else if (before && viewDir) {
+    // Build expected T0 inline (same as buildExpectedHookTrajectory[0])
+    const expectedT0 = {
+      pos: {
+        x: before.headLocation.x + viewDir.x * EXPECTED_HOOK_SPAWN_DIST,
+        y: before.headLocation.y + viewDir.y * EXPECTED_HOOK_SPAWN_DIST,
+        z: before.headLocation.z + viewDir.z * EXPECTED_HOOK_SPAWN_DIST,
+      },
+      vel: {
+        x: viewDir.x * EXPECTED_HOOK_V0,
+        y: viewDir.y * EXPECTED_HOOK_V0,
+        z: viewDir.z * EXPECTED_HOOK_V0,
+      },
+    };
+    const posErr = distance3D(hookLoc, expectedT0.pos);
+    const velErr = distance3D(hookVelocity, expectedT0.vel);
+    const obsMag = vecMagnitude(hookVelocity);
+    const expMag = vecMagnitude(expectedT0.vel);
+    let dirErr = 0;
+    if (obsMag > 0.01 && expMag > 0.01) {
+      const dot = hookVelocity.x * expectedT0.vel.x +
+                  hookVelocity.y * expectedT0.vel.y +
+                  hookVelocity.z * expectedT0.vel.z;
+      dirErr = Math.acos(clamp(dot / (obsMag * expMag), -1, 1));
+    }
+    // P8: Bedrock hook is bobber — position dominates, velocity nearly zero.
+    // T0 sample may capture transient frame. Use position-only score with
+    // wider tolerance (1 block) since hook drifts slightly in water.
+    const posOnly = posErr / EXPECTED_HOOK_TRAJECTORY_TOLERANCE;
+    const errScore = clamp(100 * (1 - posOnly), 0, 100);
+    trajectoryMatchScore = Math.round(errScore);
+  }
 
   // Player-state consistency: before→after drift + playerConsistency field
   const playerStateScore = session.playerConsistency ?? 30;
@@ -992,28 +1201,45 @@ function assessCastHookAssociation(hook, player, session, hookVelocity) {
   // sẽ giảm tổng điểm
   const consistencyMultiplier = 0.5 + (playerStateScore / 200); // 0.5-1.0
 
+  // P1.4: Evidence groups. Spatial (temporal + spatial + drift) / Kinematic
+  // (ray + direction + angular + speed) / Model (motion + trajectory).
+  const kinematicScore = (
+    rayScore * KINEMATIC_RAY_WEIGHT +
+    directionErrorScore * KINEMATIC_DIRECTION_WEIGHT +
+    angularScore * KINEMATIC_ANGULAR_WEIGHT +
+    hookVelocityScore * KINEMATIC_HOOKSPEED_WEIGHT
+  ) / 100;
+  const modelScore = (
+    motionCompScore * MODEL_MOTIONCOMP_WEIGHT +
+    trajectoryMatchScore * MODEL_TRAJECTORY_WEIGHT
+  ) / 100;
+
   // Weighted total (0-1000)
-  // P1.3: de-correlate. Ray + direction + angular → KINEMATIC group (gom).
-  // playerMomentum thay bằng predictionError (motion comp).
-  const kinematicScore = (rayScore + directionErrorScore + angularScore) / 3;
   const total = Math.round(
     (temporalScore * WEIGHT_TEMPORAL +
      spatialScore * WEIGHT_SPATIAL +
      kinematicScore * CAST_KINEMATIC_WEIGHT +
-     hookVelocityScore * WEIGHT_HOOK_VELOCITY +
-     predictionErrorScore * CAST_PREDICTION_WEIGHT +
-     expectedScore * CAST_EXPECTED_WEIGHT) / 100 * consistencyMultiplier
+     modelScore * CAST_MODEL_WEIGHT) / 100 * consistencyMultiplier
   );
 
   /** @type {EvidenceBreakdown} */
   const evidence = {
-    temporal: Math.round(temporalScore),
-    spatial: Math.round(spatialScore),
-    rayProjection: Math.round(rayScore),
-    angular: Math.round(angularScore),
-    hookVelocity: Math.round(hookVelocityScore),
-    playerMomentum: Math.round(predictionErrorScore),  // P1.1: đổi tên field cho log
-    beforeAfterConsistency: playerStateScore,
+    spatial: {
+      temporal: Math.round(temporalScore),
+      location: Math.round(spatialScore),
+      beforeAfterDrift: playerStateScore,
+    },
+    kinematic: {
+      rayProjection: Math.round(rayScore),
+      directionError: Math.round(directionErrorScore),
+      angularAlignment: Math.round(angularScore),
+      hookSpeedFit: Math.round(hookVelocityScore),
+    },
+    model: {
+      motionCompensation: Math.round(motionCompScore),
+      trajectoryMatch: trajectoryMatchScore,
+      expectedTrajectory: Math.round((motionCompScore + trajectoryMatchScore) / 2),
+    },
     total,
   };
 
@@ -1159,9 +1385,18 @@ function selectBestCastSession(hook, hookVelocity) {
 
   if (assessments.length === 0) return { top: null, second: null };
 
-  assessments.sort((a, b) => b.score - a.score);
-  const top = assessments[0];
-  const second = assessments[1] ?? null;
+  // P1.x fix: dedupe cùng playerId — nếu cùng player có nhiều candidate
+  // (synthetic + complete, rapid cast), chỉ lấy max score. Tránh
+  // densityMarginBonus penalty sai khi 1 player nhưng 2+ cast events overlap.
+  const byPlayer = new Map();
+  for (const a of assessments) {
+    const cur = byPlayer.get(a.playerId);
+    if (!cur || a.score > cur.score) byPlayer.set(a.playerId, a);
+  }
+  const deduped = Array.from(byPlayer.values());
+  deduped.sort((a, b) => b.score - a.score);
+  const top = deduped[0];
+  const second = deduped[1] ?? null;
 
   // State mapping dựa trên score + margin
   const secondScore = second?.score ?? 0;
@@ -1201,7 +1436,10 @@ function selectBestCastSession(hook, hookVelocity) {
     });
   }
 
-  return { top, second };
+  // P1.8: báo caller biết có thể dùng fallback hay không.
+  // hasFallback = true khi top null (không có candidate pass hard gate).
+  // Khi top tồn tại nhưng UNKNOWN do margin → KHÔNG fallback.
+  return { top, second, hasFallback: top === null };
 }
 
 /** @param {Entity} entity */
@@ -1434,8 +1672,17 @@ function tryMatchAll() {
     }
   }
 
+  // P1.6: chỉ correlate items với removed hook từ CONFIRMED hoặc FALLBACK sessions.
+  // UNKNOWN + DIRECT_AMBIGUOUS → skip Stage 2 (owner không đủ chắc chắn).
+  const eligibleHooks = [...pending.values()].filter((rh) => {
+    const session = sessionsByHook.get(rh.hookId);
+    if (!session) return true;  // defensive: không có session → cho qua
+    const method = session.associationMethod;
+    return method === 'DIRECT_CONFIRMED' || method === 'FALLBACK' || method === 'TENTATIVE';
+  });
+
   const assignments = correlatePendingHooks(
-    [...pending.values()],
+    eligibleHooks,
     [...itemCandidates.values()],
     now
   );
@@ -1672,6 +1919,36 @@ function processCatch(removedHook, player) {
     removedHook.playerId
   );
   catchSignal.trigger(afterEvent);
+  // P6.0: dump structured telemetry counters cho post-mortem analysis
+  const dump = {
+    totalHooks: telemetry.totalHooks,
+    confirmed: telemetry.confirmed,
+    ambiguous: telemetry.ambiguous,
+    unknown: telemetry.unknown,
+    fallback: telemetry.fallback,
+    directConfirmed: telemetry.directConfirmed,
+    directAmbiguous: telemetry.directAmbiguous,
+    raceFixSynthetic: telemetry.raceFixSynthetic,
+    pendingBeforeEnqueued: telemetry.pendingBeforeEnqueued,
+    pendingBeforeMatched: telemetry.pendingBeforeMatched,
+    pendingBeforeExpired: telemetry.pendingBeforeExpired,
+    trajectorySamplesTotal: telemetry.trajectorySamplesTotal,
+    trajectorySamplesDropped: telemetry.trajectorySamplesDropped,
+    hookSpeedSamples: telemetry.hookSpeedSamples,
+    hookSpeedMean: telemetryHookSpeedMean,
+    hookSpeedStd: telemetryHookSpeedStd,
+    hookSpeedEMA: telemetryHookSpeedEMA,
+    itemActiveCandidates: telemetry.itemActiveCandidates,
+    itemActiveMatched: telemetry.itemActiveMatched,
+    itemActiveUncertain: telemetry.itemActiveUncertain,
+    nullAssignments: telemetry.nullAssignments,
+    causalChainsLogged: telemetry.causalChainsLogged,
+    reelTotal: telemetry.reelTotal,
+    reelAssociated: telemetry.reelAssociated,
+    reelUncertain: telemetry.reelUncertain,
+    invariantViolations: telemetry.invariantViolations,
+  };
+  log(`telemetry ${JSON.stringify(dump)}`, removedHook.playerId);
 }
 
 /**
@@ -1821,15 +2098,19 @@ function onFishingRodUse(event) {
   const activeHooks = getActiveHookSessionsForPlayer(player.id);
   if (activeHooks.length > 0) {
     // Reel path: tạo ReelCandidates per active hook, score, associate
+    telemetry.reelTotal += 1;
     const reelDecisions = associateReelToHook(player, activeHooks);
     if (reelDecisions.length === 0) {
+      telemetry.reelUncertain += 1;
       log(`reel: no clear association for ${activeHooks.length} active hook(s)`, player.id);
       return;
     }
+    telemetry.reelAssociated += 1;
     for (const decision of reelDecisions) {
+      telemetry.reelMarginSum += decision.margin;
       const session = decision.session;
       transition(session, 'REEL_REQUESTED');
-      recordCausal(session.hookId, 'reel', { playerId: player.id, source: 'onFishingRodUse', score: decision.score });
+      recordCausal(session.hookId, 'reel', { playerId: player.id, source: 'onFishingRodUse', score: decision.score, margin: decision.margin });
       session.lastKnownPlayerLocation = cloneVector(player.location);
       reelSignal.trigger({
         player,
@@ -1839,7 +2120,11 @@ function onFishingRodUse(event) {
         timestamp: Date.now(),
       });
     }
-    log(`reel associated player=${player.name} hooks=${reelDecisions.length}/${activeHooks.length}`, player.id);
+    log(
+      `reel associated player=${player.name} hooks=${reelDecisions.length}/${activeHooks.length} ` +
+      `margin=${reelDecisions[0]?.margin ?? 0}`,
+      player.id
+    );
     return;
   }
 
@@ -1877,6 +2162,18 @@ function onFishingRodUse(event) {
  */
 function makeSyntheticSession(player, before) {
   const after = captureSnapshot(player);
+  // P1.2 fix: synthetic có AFTER thật (capture tại hook spawn), nên tính
+  // consistency thật từ before↔after drift, không hardcode 50.
+  let playerConsistency = 30;
+  if (before.location && after.location) {
+    const posDelta = distance3D(before.location, after.location);
+    const posScore = clamp(100 * (1 - posDelta / 2.0), 0, 100);
+    const dot = before.viewDirection.x * after.viewDirection.x +
+                before.viewDirection.y * after.viewDirection.y +
+                before.viewDirection.z * after.viewDirection.z;
+    const angScore = clamp(100 * (1 - Math.acos(clamp(dot, -1, 1)) / 0.6), 0, 100);
+    playerConsistency = Math.round((posScore + angScore) / 2);
+  }
   /** @type {CastSession} */
   const session = {
     sessionId: `pending-${before.sequenceId ?? 0}`,
@@ -1887,7 +2184,7 @@ function makeSyntheticSession(player, before) {
     after,
     createdAt: Date.now(),
     expiresAt: Date.now() + CAST_TTL_MS,
-    playerConsistency: 50,
+    playerConsistency,
     synthetic: true,
   };
   return session;
@@ -1900,7 +2197,7 @@ function onEntitySpawn(event) {
     // P0 race fix v2: KHÔNG materialize session cho mọi pending player.
     // Để selectBestCastSession tự build synthetic session on-the-fly nếu cần.
     const hookVelocity = safeGetVelocity(entity);
-    const { top, second } = selectBestCastSession(entity, hookVelocity);
+    const { top, second, hasFallback } = selectBestCastSession(entity, hookVelocity);
 
     /** @type {Player|undefined} */
     let player = undefined;
@@ -1924,8 +2221,9 @@ function onEntitySpawn(event) {
           player?.id
         );
       }
-    } else {
-      // UNKNOWN hoặc top null → thử fallback
+    } else if (hasFallback) {
+      // P1.8: top=null (không có candidate pass hard gate) → thử fallback.
+      // top tồn tại nhưng UNKNOWN do margin thấp → KHÔNG fallback (giữ UNKNOWN).
       const fb = pickFallbackOwnerForHook(entity);
       if (fb) {
         player = fb.player;
@@ -1939,6 +2237,15 @@ function onEntitySpawn(event) {
         log(`UNKNOWN owner, no fallback, skip hook=${entity.id}`, undefined);
         return;
       }
+    } else {
+      // P1.7/P1.8: top tồn tại nhưng UNKNOWN (margin thấp). KHÔNG fallback.
+      log(
+        `UNKNOWN owner (margin too low), skip hook=${entity.id} ` +
+        `top.score=${top?.score ?? 0} margin=${top?.margin ?? 0}`,
+        undefined
+      );
+      telemetry.nullAssignments += 1;
+      return;
     }
 
     if (!player || player.typeId !== 'minecraft:player') {
@@ -2015,19 +2322,46 @@ function onEntitySpawn(event) {
     else if (confidence === 'FALLBACK') telemetry.fallback += 1;
     else telemetry.unknown += 1;
 
-    // P1.4: EMA update hook speed từ CONFIRMED hooks only
+    // P1.4 + P1.5: EMA + Welford update hook speed từ CONFIRMED hooks only
     const hookSpeed = vecMagnitude(hookVelocity);
     if (confidence === 'CONFIRMED' && hookSpeed >= CAST_HOOK_VEL_MIN) {
       telemetry.hookSpeedSamples += 1;
+      // EMA (smoothing, cho log)
       if (telemetryHookSpeedEMA < 0.01) {
         telemetryHookSpeedEMA = hookSpeed;
       } else {
         telemetryHookSpeedEMA = telemetryHookSpeedEMA * (1 - HOOK_SPEED_EMA_ALPHA) + hookSpeed * HOOK_SPEED_EMA_ALPHA;
       }
+      // Welford (running mean + std, cho fit-to-distribution)
+      const n = telemetry.hookSpeedSamples;
+      const delta = hookSpeed - telemetryHookSpeedMean;
+      telemetryHookSpeedMean += delta / n;
+      const delta2 = hookSpeed - telemetryHookSpeedMean;
+      telemetryHookSpeedM2 += delta * delta2;
+      if (n >= 2) {
+        telemetryHookSpeedStd = Math.sqrt(telemetryHookSpeedM2 / (n - 1));
+      }
+      // Log mỗi 20 samples
+      if (n % 20 === 0) {
+        log(
+          `hook-speed stats n=${n} mean=${telemetryHookSpeedMean.toFixed(3)} ` +
+          `std=${telemetryHookSpeedStd.toFixed(3)} ema=${telemetryHookSpeedEMA.toFixed(3)}`,
+          player.id
+        );
+      }
+    }
+
+    // P1.6: hard invariant audit
+    if (session.castConfirmed && session.associationMethod !== 'DIRECT_CONFIRMED') {
+      console.error(`[fishing] INVARIANT VIOLATED: castConfirmed=true but associationMethod=${session.associationMethod}`);
+    }
+    if (session.associationMethod === 'DIRECT_AMBIGUOUS' && session.castConfirmed) {
+      console.error(`[fishing] INVARIANT VIOLATED: AMBIGUOUS but castConfirmed=true`);
     }
 
     // P1.2: schedule hook trajectory samples T1, T2 sau spawn
-    scheduleHookTrajectory(entity.id, hookSpeed);
+    // Truyền castSession (synthetic hoặc complete) để build expected trajectory
+    scheduleHookTrajectory(entity.id, hookSpeed, castSession);
     // P2.3: hook_active ngay khi transition FISHING xong
     recordCausal(entity.id, 'hook_active', { playerId: player.id });
 
@@ -2041,14 +2375,18 @@ function onEntitySpawn(event) {
     }
 
     if (DEBUG) {
+      const traj = hookTrajectories.get(entity.id);
       log(
         `hook spawn ${entity.id} owner=${player.name} confidence=${confidence} ` +
         `associationMethod=${session.associationMethod} castConfirmed=${session.castConfirmed} ` +
         `score=${top?.score ?? 0} margin=${top ? top.score - (second?.score ?? 0) : 0} ` +
-        `T=${evidence?.temporal ?? 0} S=${evidence?.spatial ?? 0} ` +
-        `R=${evidence?.rayProjection ?? 0} A=${evidence?.angular ?? 0} ` +
-        `H=${evidence?.hookVelocity ?? 0} M=${evidence?.playerMomentum ?? 0} ` +
-        `B=${evidence?.beforeAfterConsistency ?? 0}`,
+        `sT=${evidence?.spatial?.temporal ?? 0} sL=${evidence?.spatial?.location ?? 0} ` +
+        `sD=${evidence?.spatial?.beforeAfterDrift ?? 0} ` +
+        `kR=${evidence?.kinematic?.rayProjection ?? 0} kD=${evidence?.kinematic?.directionError ?? 0} ` +
+        `kA=${evidence?.kinematic?.angularAlignment ?? 0} kS=${evidence?.kinematic?.hookSpeedFit ?? 0} ` +
+        `mC=${evidence?.model?.motionCompensation ?? 0} mT=${evidence?.model?.trajectoryMatch ?? 0} ` +
+        `mE=${evidence?.model?.expectedTrajectory ?? 0} ` +
+        `trajMatch=${traj?.trajectoryMatchScore ?? 'n/a'}`,
         player.id
       );
     }
@@ -2325,7 +2663,12 @@ function onBeforeEntityRemove(event) {
   if (session?.sessionId) {
     boundHookBySessionId.delete(session.sessionId);
   }
-  cleanupHookTrajectory(entity.id);
+  // P1.2 fix: defer cleanupHookTrajectory 5 ticks. system.runTimeout T1/T2
+  // có thể fire SAU hook_remove (cùng tick batch) — nếu cleanup ngay,
+  // traj=undefined → trajectoryMatchScore = 0. Defer 5 tick = chắc chắn
+  // T1 (1 tick) + T2 (2 tick) đã chạy xong.
+  const hookIdForTraj = entity.id;
+  system.runTimeout(() => cleanupHookTrajectory(hookIdForTraj), 5);
   // P4.2: cleanup hysteresis cache
   committedAssignments.delete(entity.id);
   // P2.3: log final causal chain, sau đó cleanup
@@ -2465,7 +2808,7 @@ export function init() {
   if (inventoryEvent) inventoryEvent.subscribe(onInventoryChange);
 
   startCleanupInterval();
-  log('detector initialized v2026-09-01-p5-fine-constants', undefined);
+  log('detector initialized v2026-09-04-p11-tolerance-4x', undefined);
 
   if (!ENABLE_PICKUP_INTERCEPTION) {
     log('pickup interception disabled', undefined);

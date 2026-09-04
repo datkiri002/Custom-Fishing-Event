@@ -1,0 +1,13 @@
+scenario_id,owner_player_id,expected_confidence,notes
+1_solo,-8589934591,CONFIRMED,solo cast standing
+8_multi_session_same_p,-8589934591,CONFIRMED,cast 2+ in a row
+9_same_tick_rapid,-8589934591,CONFIRMED,rapid cast same tick
+10_player_running,-8589934591,CONFIRMED,player running forward
+11_player_jumping,-8589934591,CONFIRMED,player jumping
+12_player_turning,-8589934591,CONFIRMED,player turning
+13_cast_immediate_reel,-8589934591,CONFIRMED,cast then immediate reel
+14_old_hook_new_cast,-8589934591,CONFIRMED,old hook still in world + new cast
+15_multi_active_hooks,-8589934591,CONFIRMED,2+ active hooks at once
+16_hook_spawn_after_itemUse,-8589934591,CONFIRMED,hook spawn after itemUse
+17_trajectory_distractor,-8589934591,CONFIRMED,distractor hook flying across
+18_ambiguous_near_equal,-8589934591,AMBIGUOUS,near-equal candidates
