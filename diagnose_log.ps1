@@ -138,6 +138,41 @@ if ($withIssues.Count -eq 0) {
   $withIssues | Format-Table hookId, score, mT, kS, trajMatch, @{N='issues';E={$_.issues -join ', '}} -AutoSize | Out-String | Write-Host
 }
 
+# P12: per-item-type breakdown
+""
+"===== PER-ITEM-TYPE BREAKDOWN ====="
+$itemStats = @{}
+$itemRx = [regex]'\[fishing\] match hook=.* item=(\S+) score=([\d\.]+)'
+foreach ($line in $lines) {
+  $im = $itemRx.Match($line)
+  if (!$im.Success) { continue }
+  $it = $im.Groups[1].Value
+  $sc = [double]$im.Groups[2].Value
+  if (-not $itemStats.ContainsKey($it)) {
+    $itemStats[$it] = [PSCustomObject]@{ item = $it; count = 0; sumScore = 0.0; minScore = 999.0; maxScore = 0.0 }
+  }
+  $itemStats[$it].count += 1
+  $itemStats[$it].sumScore += $sc
+  if ($sc -lt $itemStats[$it].minScore) { $itemStats[$it].minScore = $sc }
+  if ($sc -gt $itemStats[$it].maxScore) { $itemStats[$it].maxScore = $sc }
+}
+$itemRows = @()
+foreach ($k in $itemStats.Keys) {
+  $s = $itemStats[$k]
+  $itemRows += [PSCustomObject]@{
+    item = $s.item
+    count = $s.count
+    avgScore = [math]::Round($s.sumScore / $s.count, 1)
+    minScore = [math]::Round($s.minScore, 1)
+    maxScore = [math]::Round($s.maxScore, 1)
+  }
+}
+if ($itemRows.Count -eq 0) {
+  Write-Host "  (no match lines)" -ForegroundColor Gray
+} else {
+  $itemRows | Sort-Object count -Descending | Format-Table -AutoSize | Out-String | Write-Host
+}
+
 # Save
 if ($OutFile) {
   $diag | ConvertTo-Json -Depth 3 | Set-Content $OutFile
